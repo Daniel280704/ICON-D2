@@ -8,7 +8,6 @@ import pytz
 import tempfile
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.colors import BoundaryNorm, ListedColormap
 from datetime import datetime, timedelta, timezone
 from scipy.interpolate import griddata
 import warnings
@@ -19,6 +18,9 @@ import cartopy.io.shapereader as shpreader
 import xarray as xr
 
 import earthkit.data
+import earthkit.plots
+from earthkit.plots.geo import bounds, domains
+from earthkit.plots.styles import Style
 from earthkit.data import config
 
 warnings.filterwarnings('ignore')
@@ -79,7 +81,6 @@ def scarica_step_grib(session: requests.Session, run_str: str, member: int, h: i
             ds.close()
             os.remove(temp_path)
             
-            # Conversione in cm
             if np.nanmax(raw_data) < 1.0: 
                 data_cm = raw_data * 100.0
             elif np.nanmax(raw_data) > 50:
@@ -166,15 +167,17 @@ def genera_album_grandine(session: requests.Session, dt_run_utc: datetime, run_s
     blocchi = raggruppa_in_blocchi(dt_run_local)
 
     xmin, xmax, ymin, ymax = 6.0, 10.5, 43.5, 46.8
-    domain = [xmin, xmax, ymin, ymax]
-
-    # Griglia regolare per l'interpolazione "a chiazze"
+    
+    # Griglia di destinazione (300x300 pixel) per Earthkit
     grid_lon = np.linspace(xmin, xmax, 300)
     grid_lat = np.linspace(ymin, ymax, 300)
     grid_lon2d, grid_lat2d = np.meshgrid(grid_lon, grid_lat)
 
     my_levels = [0.5, 1, 2, 3, 4, 5, 7, 10, 15]
     my_colors = ["#a0e6ff", "#00a0ff", "#00ff00", "#ffff00", "#ffaa00", "#ff0000", "#ff00ff", "#ffffff"]
+    
+    # Configurazione di dominio Earthkit (simile al file di riferimento)
+    ek_domain = domains.Domain.from_bbox(bbox=bounds.BoundingBox(xmin, xmax, ymin, ymax, ccrs.Geodetic()), name="Piemonte")
 
     regions_feature = cfeature.NaturalEarthFeature('cultural', 'admin_1_states_provinces', '10m', edgecolor='black', facecolor='none', linewidth=1.5)
     prov_feature = None
@@ -189,7 +192,7 @@ def genera_album_grandine(session: requests.Session, dt_run_utc: datetime, run_s
     lats_grid, lons_grid = None, None
 
     for block_name, ore_list in blocchi.items():
-        print(f"\nGenerazione album Grandine ICON-D2-RUC (Chiazze): {block_name}")
+        print(f"\nGenerazione album Grandine ICON-D2-RUC (Chiazze via Earthkit): {block_name}")
         percorsi_foto = []
 
         for h in ore_list:
@@ -218,57 +221,47 @@ def genera_album_grandine(session: requests.Session, dt_run_utc: datetime, run_s
             if ensemble_sum is not None and valid_members_count > 0:
                 mean_vals = ensemble_sum / valid_members_count
                 
-                # --- INTERPOLAZIONE A CHIAZZE CONTINUA ---
+                # --- INTERPOLAZIONE CORRETTA A CHIAZZE (NEAREST) ---
+                # Interpoliamo su tutti i punti per evitare di "unire" punti isolati creando strisce
                 pts = np.column_stack((lons_grid.ravel(), lats_grid.ravel()))
                 vals = mean_vals.ravel()
                 
-                # Consideriamo i punti validi con valore > 0.1 per accelerare l'interpolazione
-                valid_mask = ~np.isnan(vals) & (vals >= 0.1)
+                grid_val = griddata(pts, vals, (grid_lon2d, grid_lat2d), method='nearest', fill_value=0.0)
                 
-                fig = plt.figure(figsize=(10, 8))
-                ax = plt.axes(projection=ccrs.Mercator())
-                ax.set_extent(domain, crs=ccrs.PlateCarree())
+                # Creiamo il DataArray di xarray compatibile nativamente con Earthkit
+                hail_geo = xr.DataArray(
+                    grid_val,
+                    coords=[("lat", grid_lat), ("lon", grid_lon)],
+                    name="hail_max"
+                )
+                
+                # Mascheriamo per i valori inferiori alla soglia visiva
+                hail_geo = hail_geo.where(hail_geo >= 0.5)
 
-                ax.add_feature(regions_feature)
-                if prov_feature: ax.add_feature(prov_feature)
-                else: 
-                    ax.coastlines(resolution='10m')
-                    ax.add_feature(cfeature.BORDERS)
+                # --- PLOT CON EARTHKIT (Identico al file 10_grandine_max.py) ---
+                chart = earthkit.plots.Map(domain=ek_domain)
+                chart.grid_cells(hail_geo, x="lon", y="lat", style=Style(colors=my_colors, levels=my_levels))
 
-                cmap = ListedColormap(my_colors)
-                norm = BoundaryNorm(my_levels, cmap.N)
+                chart.ax.add_feature(regions_feature)
+                if prov_feature: chart.ax.add_feature(prov_feature)
+                else: chart.borders()
 
-                if np.any(valid_mask):
-                    # Interpolazione sulla griglia regolare
-                    grid_val = griddata(pts[valid_mask], vals[valid_mask], (grid_lon2d, grid_lat2d), method='linear', fill_value=np.nan)
-                    
-                    # Mascheriamo i valori inferiori alla soglia minima (0.5 cm)
-                    grid_val_masked = np.ma.masked_where(np.isnan(grid_val) | (grid_val < 0.5), grid_val)
-
-                    # Disegno a CHIAZZE (pcolormesh)
-                    sc = ax.pcolormesh(grid_lon2d, grid_lat2d, grid_val_masked,
-                                       cmap=cmap, norm=norm,
-                                       transform=ccrs.PlateCarree(),
-                                       shading='auto')
-                    
-                    cbar = plt.colorbar(sc, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
-                    cbar.set_label("Grandine Max Media (cm) - RUC EPS", fontweight='bold')
-
-                ax.plot(7.51, 45.07, marker='o', color='brown', markersize=6, transform=ccrs.PlateCarree())
-                for lo, la, sig in zip(lons_plot, lats_plot, sigle):
-                    ax.plot(lo, la, marker='o', color='black', markersize=3, transform=ccrs.PlateCarree())
-                    ax.text(lo + 0.05, la + 0.05, sig, color='black', fontsize=9, fontweight='bold', transform=ccrs.PlateCarree())
+                chart.ax.plot(7.51, 45.07, marker='o', color='brown', markersize=6, transform=ccrs.PlateCarree())
+                for lon, lat, sigla in zip(lons_plot, lats_plot, sigle):
+                    chart.ax.plot(lon, lat, marker='o', color='black', markersize=3, transform=ccrs.PlateCarree())
+                    chart.ax.text(lon + 0.05, lat + 0.05, sigla, color='black', fontsize=9, fontweight='bold', transform=ccrs.PlateCarree())
 
                 dt_target_local = (dt_run_utc + timedelta(hours=h)).astimezone(rome_tz)
                 str_valida = f"Ora {dt_target_local.strftime('%H:%M del %d/%m/%Y')} (+{h}h)"
 
                 title = f"ICON-D2-RUC EPS - Grandine Max Media (cm)\nRun: {run_str} UTC | Target: {str_valida}"
-                plt.title(title, fontweight='bold')
+                chart.title(title)
+                chart.legend(label="Grandine Max Media (cm)")
 
                 filename = f"ruc_hail_{h}.png"
-                plt.savefig(filename, dpi=200, bbox_inches='tight')
-                plt.close(fig)
+                chart.save(filename)
                 percorsi_foto.append(filename)
+                plt.close(chart.fig)
 
         if percorsi_foto:
             nome_run = run_str.split('T')[-1].replace(':00', 'Z')
@@ -281,7 +274,7 @@ def genera_album_grandine(session: requests.Session, dt_run_utc: datetime, run_s
         time.sleep(10)
 
 def main():
-    print("Ricerca dell'ultimo run ICON-D2-RUC EPS (Resa a chiazze)...")
+    print("Ricerca dell'ultimo run ICON-D2-RUC EPS (Resa grafica Earthkit)...")
     with requests.Session() as session:
         session.headers.update({"User-Agent": "MeteoBot-ICOND2-RUC/3.0"})
         is_new, dt_run_utc, run_str = trova_ultimo_run_completo(session)
