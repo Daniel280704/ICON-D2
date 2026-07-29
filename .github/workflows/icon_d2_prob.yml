@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # Ogni ora al minuto 15 (modifica se vuoi)
-    #- cron: "15 * * * *"
+    - cron: "15 * * * *"
 
 jobs:
   run-icon-d2-prob:
@@ -15,7 +15,7 @@ jobs:
       PYTHONUNBUFFERED: "1"
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      TELEGRAM_THREAD_ID_5685: ${{ secrets.TELEGRAM_THREAD_ID_5685 }}
+      TELEGRAM_THREAD_ID_3: ${{ secrets.TELEGRAM_THREAD_ID_3 }}
 
     steps:
       - name: Checkout repository
