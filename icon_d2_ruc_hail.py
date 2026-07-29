@@ -19,7 +19,7 @@ import xarray as xr
 
 import earthkit.data
 import earthkit.plots
-from earthkit.plots.geo import bounds, domains
+from earthkit.plots import bounds, domains
 from earthkit.plots.styles import Style
 from earthkit.data import config
 
