@@ -19,7 +19,6 @@ import xarray as xr
 
 import earthkit.data
 import earthkit.plots
-from earthkit.plots import bounds, domains
 from earthkit.plots.styles import Style
 from earthkit.data import config
 
@@ -176,9 +175,6 @@ def genera_album_grandine(session: requests.Session, dt_run_utc: datetime, run_s
     my_levels = [0.5, 1, 2, 3, 4, 5, 7, 10, 15]
     my_colors = ["#a0e6ff", "#00a0ff", "#00ff00", "#ffff00", "#ffaa00", "#ff0000", "#ff00ff", "#ffffff"]
     
-    # Configurazione di dominio Earthkit (simile al file di riferimento)
-    ek_domain = domains.Domain.from_bbox(bbox=bounds.BoundingBox(xmin, xmax, ymin, ymax, ccrs.Geodetic()), name="Piemonte")
-
     regions_feature = cfeature.NaturalEarthFeature('cultural', 'admin_1_states_provinces', '10m', edgecolor='black', facecolor='none', linewidth=1.5)
     prov_feature = None
     shp_path = "shapefiles/ProvCM01012026_WGS84.shp"
@@ -238,8 +234,8 @@ def genera_album_grandine(session: requests.Session, dt_run_utc: datetime, run_s
                 # Mascheriamo per i valori inferiori alla soglia visiva
                 hail_geo = hail_geo.where(hail_geo >= 0.5)
 
-                # --- PLOT CON EARTHKIT (Identico al file 10_grandine_max.py) ---
-                chart = earthkit.plots.Map(domain=ek_domain)
+                # --- PLOT CON EARTHKIT ---
+                chart = earthkit.plots.Map(domain=[xmin, xmax, ymin, ymax])
                 chart.grid_cells(hail_geo, x="lon", y="lat", style=Style(colors=my_colors, levels=my_levels))
 
                 chart.ax.add_feature(regions_feature)
