@@ -163,7 +163,7 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
 def invia_album_telegram(file_paths: list, caption: str):
     token = os.getenv("TELEGRAM_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    thread_id = os.getenv("TELEGRAM_THREAD_ID_5685")
+    thread_id = os.getenv("TELEGRAM_THREAD_ID_3")
 
     if not token or not chat_id: return
 
