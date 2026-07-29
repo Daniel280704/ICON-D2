@@ -223,8 +223,8 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
     xmin, xmax, ymin, ymax = 6.0, 10.5, 43.5, 46.8
     domain = [xmin, xmax, ymin, ymax]
 
-    # Livelli SDI adattati per la palette a 9 colori
-    my_levels = [0.1, 0.5, 1, 1.5, 2, 3, 4, 6, 8, 15]
+    # Livelli SDI calibrati per Ensemble Mean (10 valori per 9 colori)
+    my_levels = [0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6]
     my_colors = ["#a0e6ff", "#00a0ff", "#00ff00", "#ffff00", "#ffaa00", "#ff0000", "#cc0000", "#ff00ff", "#800080"]
     
     regions_feature = cfeature.NaturalEarthFeature('cultural', 'admin_1_states_provinces', '10m', edgecolor='black', facecolor='none', linewidth=1.5)
@@ -277,6 +277,7 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                                     s=4, marker='s', transform=ccrs.PlateCarree(),
                                     edgecolors='none')
                     
+                    # Generazione della legenda (Colorbar)
                     cbar = plt.colorbar(sc, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
                     cbar.set_label("SDI 2 Medio (Adimensionale)", fontweight='bold')
 
