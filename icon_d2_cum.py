@@ -28,7 +28,6 @@ config.set("cache-policy", "temporary")
 LATITUDE = 45.07
 LONGITUDE = 7.54
 
-# File sentinella separato per la versione cumulativa totale
 FILE_LAST_HOUR = "ultima_ora_icond2_cum.txt" 
 RUN_DURATION = 48 
 START_DELAY = 0
@@ -107,9 +106,6 @@ def estrai_limiti_run(hourly_data: dict, ref_param: str, utc_offset_sec: int) ->
 
 
 def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
-    """
-    Scarica l'accumulo sulla GRIGLIA NATIVA ICOSAEDRALE per il passo h_step.
-    """
     run_hour_syn = dt_run_utc.hour          
     run_hour = f"{run_hour_syn:02d}"
     date_hour = dt_run_utc.strftime('%Y%m%d%H')
@@ -223,7 +219,8 @@ def genera_album_cumulativo(dt_run_utc: datetime, nome_run: str):
     xmin, xmax, ymin, ymax = 6.0, 10.5, 43.5, 46.8
     domain = [xmin, xmax, ymin, ymax]
 
-    my_levels = [0.5, 1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275, 300]
+    # Nuova scala aggiornata
+    my_levels = [0.5, 2, 5, 10, 20, 40, 60, 80, 100, 125, 150, 200, 250, 300, 350, 400, 450, 500, 600]
     my_colors = [
         "#e6f2ff", "#99ccff", "#3399ff", "#004cff", "#66e666", "#33cc33", 
         "#009900", "#99cc00", "#ffe600", "#e6b300", "#ff9900", "#ff6600", 
@@ -249,14 +246,10 @@ def genera_album_cumulativo(dt_run_utc: datetime, nome_run: str):
         print(f"\nGenerazione accumulo cumulativo totale fino al {date_str} (H+{max_h})...")
 
         try:
-            # Scarica o recupera il totale accumulato dall'inizio del run fino allo step max_h
             if max_h not in cache_tot:
                 cache_tot[max_h] = scarica_step_precipitazione(dt_run_utc, max_h)
             
-            # Accumulo cumulativo dall'inizio del run
             prec_cumulata = cache_tot[max_h]
-
-            # Media degli scenari Ensemble
             prec_mean_xr = prec_cumulata.mean(dim="eps")
 
             lat_vals = prec_mean_xr['latitude'].values
@@ -287,7 +280,6 @@ def genera_album_cumulativo(dt_run_utc: datetime, nome_run: str):
                 cbar = plt.colorbar(sc, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
                 cbar.set_label("Precipitazione Cumulata Totale Media (mm)", fontweight='bold')
 
-            # Città principali
             ax.plot(7.51, 45.07, marker='o', color='brown', markersize=6, transform=ccrs.PlateCarree())
             for lo, la, sig in zip(lons, lats, sigle):
                 ax.plot(lo, la, marker='o', color='black', markersize=3, transform=ccrs.PlateCarree())
