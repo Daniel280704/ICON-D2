@@ -10,6 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import BoundaryNorm, ListedColormap
 from datetime import datetime, timedelta, timezone
+from scipy.interpolate import griddata
 import warnings
 
 import cartopy.crs as ccrs
@@ -31,27 +32,20 @@ FILE_LAST_HOUR = "ultima_ora_icond2_ruc_hail.txt"
 RUN_DURATION = 27 
 
 def trova_ultimo_run_completo(session: requests.Session) -> tuple[bool, datetime, str]:
-    """Cerca l'ultimo run ICON-D2-RUC-EPS completo controllando l'ultimo step del membro 20."""
     now = datetime.now(timezone.utc)
-    
-    # Controlla a ritroso le ultime 6 ore
     for i in range(6):
         dt_run = now - timedelta(hours=i)
         run_str = dt_run.strftime("%Y-%m-%dT%H:00")
-        
-        # Testiamo se l'ultimo step (27h) del 20esimo membro è online con una request HEAD velocissima
         test_url = f"https://opendata.dwd.de/weather/nwp/v1/m/icon-d2-ruc-eps/p/KEF_HAIL_MAX_S/r/{run_str}/e/20/s/PT027H00M.grib2"
         
         try:
             resp = session.head(test_url, timeout=10)
             if resp.status_code == 200:
-                # Controlla se lo abbiamo già elaborato
                 if os.path.exists(FILE_LAST_HOUR):
                     with open(FILE_LAST_HOUR, "r") as f:
-                        ultima_ora_salvata = f.read().strip()
-                    if run_str <= ultima_ora_salvata:
-                        print(f"✅ Run ICON-D2-RUC-EPS {run_str} già elaborato.")
-                        return False, None, None
+                        if run_str <= f.read().strip():
+                            print(f"✅ Run ICON-D2-RUC-EPS {run_str} già elaborato.")
+                            return False, None, None
                 
                 with open(FILE_LAST_HOUR, "w") as f:
                     f.write(run_str)
@@ -63,7 +57,6 @@ def trova_ultimo_run_completo(session: requests.Session) -> tuple[bool, datetime
 
 
 def scarica_step_grib(session: requests.Session, run_str: str, member: int, h: int, m: int, max_retries=2):
-    """Scarica il singolo file da 15 minuti ed estrae i dati."""
     url = f"https://opendata.dwd.de/weather/nwp/v1/m/icon-d2-ruc-eps/p/KEF_HAIL_MAX_S/r/{run_str}/e/{member:02d}/s/PT{h:03d}H{m:02d}M.grib2"
     
     for tentativo in range(max_retries):
@@ -79,7 +72,6 @@ def scarica_step_grib(session: requests.Session, run_str: str, member: int, h: i
             ds = earthkit.data.from_source("file", temp_path).to_xarray()
             var_name = list(ds.data_vars)[0]
             
-            # Estrazione array numpy per prestazioni massime
             raw_data = ds[var_name].values
             lats = ds['latitude'].values
             lons = ds['longitude'].values
@@ -87,11 +79,11 @@ def scarica_step_grib(session: requests.Session, run_str: str, member: int, h: i
             ds.close()
             os.remove(temp_path)
             
-            # Grib SI Unit (metri) -> Centimetri (cm)
+            # Conversione in cm
             if np.nanmax(raw_data) < 1.0: 
                 data_cm = raw_data * 100.0
             elif np.nanmax(raw_data) > 50:
-                data_cm = raw_data / 10.0 # Fallback se i dati nativi fossero in mm
+                data_cm = raw_data / 10.0
             else:
                 data_cm = raw_data
 
@@ -123,8 +115,7 @@ def invia_album_telegram(file_paths: list, caption: str):
         return
 
     url = f"https://api.telegram.org/bot{token}/sendMediaGroup"
-    media = []
-    files = {}
+    media, files = [], {}
 
     for idx, path in enumerate(file_paths):
         media.append({
@@ -177,6 +168,11 @@ def genera_album_grandine(session: requests.Session, dt_run_utc: datetime, run_s
     xmin, xmax, ymin, ymax = 6.0, 10.5, 43.5, 46.8
     domain = [xmin, xmax, ymin, ymax]
 
+    # Griglia regolare per l'interpolazione "a chiazze"
+    grid_lon = np.linspace(xmin, xmax, 300)
+    grid_lat = np.linspace(ymin, ymax, 300)
+    grid_lon2d, grid_lat2d = np.meshgrid(grid_lon, grid_lat)
+
     my_levels = [0.5, 1, 2, 3, 4, 5, 7, 10, 15]
     my_colors = ["#a0e6ff", "#00a0ff", "#00ff00", "#ffff00", "#ffaa00", "#ff0000", "#ff00ff", "#ffffff"]
 
@@ -190,54 +186,44 @@ def genera_album_grandine(session: requests.Session, dt_run_utc: datetime, run_s
     lons_plot = [7.68,  7.55,  8.20,  8.61,  8.42,  8.61,  8.05,  8.55]
     sigle = ["TO", "CN", "AT", "AL", "VC", "NO", "BI", "VB"]
 
-    lats_grid = None
-    lons_grid = None
+    lats_grid, lons_grid = None, None
 
     for block_name, ore_list in blocchi.items():
-        print(f"\nGenerazione album Grandine ICON-D2-RUC: {block_name}")
+        print(f"\nGenerazione album Grandine ICON-D2-RUC (Chiazze): {block_name}")
         percorsi_foto = []
 
         for h in ore_list:
-            print(f"  ⬇️  Elaborazione H={h} (Media dei Massimi di ogni membro)...")
+            print(f"  ⬇️  Elaborazione H={h} (Media dei Massimi)...")
             
             ensemble_sum = None
             valid_members_count = 0
             
-            # Analisi membro per membro
             for member in range(1, 21):
                 member_max = None
-                
-                # Le 4 scadenze temporali di 15 min interne all'ora target H
-                # es. per H=1: 00h15, 00h30, 00h45, 01h00
-                steps = [
-                    (h - 1, 15),
-                    (h - 1, 30),
-                    (h - 1, 45),
-                    (h, 0)
-                ]
+                steps = [(h - 1, 15), (h - 1, 30), (h - 1, 45), (h, 0)]
                 
                 for step_h, step_m in steps:
                     data_cm, coords = scarica_step_grib(session, run_str, member, step_h, step_m)
                     
                     if data_cm is not None:
                         if lats_grid is None: lats_grid, lons_grid = coords
-                        
-                        if member_max is None:
-                            member_max = data_cm
-                        else:
-                            member_max = np.maximum(member_max, data_cm) # Calcolo del picco nel membro
+                        if member_max is None: member_max = data_cm
+                        else: member_max = np.maximum(member_max, data_cm)
                             
-                # Aggreghiamo il picco del membro nel pool per la media dell'Ensemble
                 if member_max is not None:
-                    if ensemble_sum is None:
-                        ensemble_sum = member_max.copy()
-                    else:
-                        ensemble_sum += member_max
+                    if ensemble_sum is None: ensemble_sum = member_max.copy()
+                    else: ensemble_sum += member_max
                     valid_members_count += 1
             
-            # Se abbiamo dati, facciamo la media ed esportiamo l'immagine
             if ensemble_sum is not None and valid_members_count > 0:
                 mean_vals = ensemble_sum / valid_members_count
+                
+                # --- INTERPOLAZIONE A CHIAZZE CONTINUA ---
+                pts = np.column_stack((lons_grid.ravel(), lats_grid.ravel()))
+                vals = mean_vals.ravel()
+                
+                # Consideriamo i punti validi con valore > 0.1 per accelerare l'interpolazione
+                valid_mask = ~np.isnan(vals) & (vals >= 0.1)
                 
                 fig = plt.figure(figsize=(10, 8))
                 ax = plt.axes(projection=ccrs.Mercator())
@@ -252,14 +238,18 @@ def genera_album_grandine(session: requests.Session, dt_run_utc: datetime, run_s
                 cmap = ListedColormap(my_colors)
                 norm = BoundaryNorm(my_levels, cmap.N)
 
-                # Mostriamo solo grandine >= 0.5 cm
-                mask = mean_vals >= 0.5
+                if np.any(valid_mask):
+                    # Interpolazione sulla griglia regolare
+                    grid_val = griddata(pts[valid_mask], vals[valid_mask], (grid_lon2d, grid_lat2d), method='linear', fill_value=np.nan)
+                    
+                    # Mascheriamo i valori inferiori alla soglia minima (0.5 cm)
+                    grid_val_masked = np.ma.masked_where(np.isnan(grid_val) | (grid_val < 0.5), grid_val)
 
-                if np.any(mask):
-                    sc = ax.scatter(lons_grid[mask], lats_grid[mask], 
-                                    c=mean_vals[mask], cmap=cmap, norm=norm,
-                                    s=4, marker='s', transform=ccrs.PlateCarree(),
-                                    edgecolors='none')
+                    # Disegno a CHIAZZE (pcolormesh)
+                    sc = ax.pcolormesh(grid_lon2d, grid_lat2d, grid_val_masked,
+                                       cmap=cmap, norm=norm,
+                                       transform=ccrs.PlateCarree(),
+                                       shading='auto')
                     
                     cbar = plt.colorbar(sc, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
                     cbar.set_label("Grandine Max Media (cm) - RUC EPS", fontweight='bold')
@@ -279,8 +269,6 @@ def genera_album_grandine(session: requests.Session, dt_run_utc: datetime, run_s
                 plt.savefig(filename, dpi=200, bbox_inches='tight')
                 plt.close(fig)
                 percorsi_foto.append(filename)
-            else:
-                print(f"  ❌ Nessun dato valido recuperato per l'ora {h}.")
 
         if percorsi_foto:
             nome_run = run_str.split('T')[-1].replace(':00', 'Z')
@@ -293,19 +281,16 @@ def genera_album_grandine(session: requests.Session, dt_run_utc: datetime, run_s
         time.sleep(10)
 
 def main():
-    print("Ricerca dell'ultimo run ICON-D2-RUC EPS (v1 API DWD)...")
-    
-    # Utilizzo di una Session HTTP per riusare le connessioni e accelerare massicciamente i download sequenziali
+    print("Ricerca dell'ultimo run ICON-D2-RUC EPS (Resa a chiazze)...")
     with requests.Session() as session:
         session.headers.update({"User-Agent": "MeteoBot-ICOND2-RUC/3.0"})
-        
         is_new, dt_run_utc, run_str = trova_ultimo_run_completo(session)
 
         if is_new:
             print(f"🚀 Lancio generazione Grandine ICON-D2-RUC EPS per il RUN {run_str}")
             genera_album_grandine(session, dt_run_utc, run_str)
         else:
-            print("Nessun nuovo run trovato oppure in fase di elaborazione. Uscita.")
+            print("Nessun nuovo run trovato. Uscita.")
 
 if __name__ == "__main__":
     main()
