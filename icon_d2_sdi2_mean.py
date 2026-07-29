@@ -115,7 +115,6 @@ def scarica_step_sdi2(dt_run_utc, h_step, max_retries=3):
     date_hour = dt_run_utc.strftime('%Y%m%d%H')
     step_str = f"{h_step:03d}"
     
-    # URL dedicato a SDI 2
     url_sdi = f"https://opendata.dwd.de/weather/nwp/icon-d2-eps/grib/{run_hour}/sdi_2/icon-d2-eps_germany_icosahedral_single-level_{date_hour}_{step_str}_2d_sdi_2.grib2.bz2"
 
     def _download_one(url: str):
@@ -152,7 +151,6 @@ def scarica_step_sdi2(dt_run_utc, h_step, max_retries=3):
 def invia_album_telegram(file_paths: list, caption: str):
     token = os.getenv("TELEGRAM_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    # Thread ID 883 impostato da Action
     thread_id = os.getenv("TELEGRAM_THREAD_ID_883")
 
     if not token or not chat_id: return
@@ -249,7 +247,6 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 # --- Calcolo della Media degli Scenari (Ensemble Mean) ---
                 sdi_mean_xr = curr_sdi.mean(dim="eps")
                 
-                # Estraiamo gli array monodimensionali
                 lat_vals = sdi_mean_xr['latitude'].values
                 lon_vals = sdi_mean_xr['longitude'].values
                 mean_vals = sdi_mean_xr.values
@@ -268,18 +265,19 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 cmap = ListedColormap(my_colors)
                 norm = BoundaryNorm(my_levels, cmap.N)
 
-                # Filtro soglia minima SDI a 0.1
+                # Disegno dei dati solo se ci sono valori sopra soglia
                 mask = mean_vals >= 0.1
-                
                 if np.any(mask):
-                    sc = ax.scatter(lon_vals[mask], lat_vals[mask], 
-                                    c=mean_vals[mask], cmap=cmap, norm=norm,
-                                    s=4, marker='s', transform=ccrs.PlateCarree(),
-                                    edgecolors='none')
+                    ax.scatter(lon_vals[mask], lat_vals[mask], 
+                               c=mean_vals[mask], cmap=cmap, norm=norm,
+                               s=4, marker='s', transform=ccrs.PlateCarree(),
+                               edgecolors='none')
                     
-                    # Generazione della legenda (Colorbar)
-                    cbar = plt.colorbar(sc, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
-                    cbar.set_label("SDI 2 Medio (Adimensionale)", fontweight='bold')
+                # --- FORZATURA DELLA LEGENDA SEMPRE VISIBILE ---
+                sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+                sm.set_array([]) # Array vuoto, serve solo per disegnare la barra
+                cbar = plt.colorbar(sm, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
+                cbar.set_label("SDI 2 Medio (Adimensionale)", fontweight='bold')
 
                 # Aggiunta principali città
                 ax.plot(7.51, 45.07, marker='o', color='brown', markersize=6, transform=ccrs.PlateCarree())
