@@ -227,7 +227,7 @@ def genera_album_24h(dt_run_utc: datetime, nome_run: str):
     xmin, xmax, ymin, ymax = 6.0, 10.5, 43.5, 46.8
     domain = [xmin, xmax, ymin, ymax]
 
-    my_levels = [0.1, 0.2, 0.5, 1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 40, 50, 75, 100, 150, 200]
+    my_levels = [0.5, 1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275, 300]
     my_colors = [
         "#e6f2ff", "#99ccff", "#3399ff", "#004cff", "#66e666", "#33cc33", 
         "#009900", "#99cc00", "#ffe600", "#e6b300", "#ff9900", "#ff6600", 
@@ -292,7 +292,7 @@ def genera_album_24h(dt_run_utc: datetime, nome_run: str):
             cmap = ListedColormap(my_colors)
             norm = BoundaryNorm(my_levels, cmap.N)
 
-            mask = mean_vals >= 0.1
+            mask = mean_vals >= 0.5
 
             if np.any(mask):
                 sc = ax.scatter(lon_vals[mask], lat_vals[mask], 
