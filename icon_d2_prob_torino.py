@@ -9,7 +9,8 @@ import bz2
 import tempfile
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.patheffects as PathEffects # <-- IMPORT AGGIUNTO
+import matplotlib.patheffects as PathEffects
+import matplotlib.cm as cm
 from matplotlib.colors import BoundaryNorm, ListedColormap
 from datetime import datetime, timedelta, timezone
 import warnings
@@ -17,6 +18,7 @@ import warnings
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import cartopy.io.shapereader as shpreader
+import cartopy.io.img_tiles as cimgt # Modulo Google Tiles aggiunto
 import xarray as xr
 
 import earthkit.data
@@ -301,7 +303,10 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 ax = plt.axes(projection=ccrs.Mercator())
                 ax.set_extent(domain, crs=ccrs.PlateCarree())
 
-                ax.stock_img()
+                # --- IMPLEMENTAZIONE GOOGLE MAPS HD ---
+                # lyrs=p : Terrain/Physical + Strade/Autostrade + Fiumi
+                tiler = cimgt.GoogleTiles(url="https://mt0.google.com/vt/lyrs=p&hl=it&x={x}&y={y}&z={z}")
+                ax.add_image(tiler, 11) # Zoom livello 11 (dettaglio eccellente per scala provinciale)
                 
                 ax.add_feature(regions_feature)
                 if prov_feature: ax.add_feature(prov_feature)
@@ -317,12 +322,14 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                                         levels=my_levels, cmap=cmap, norm=norm,
                                         transform=ccrs.PlateCarree(), alpha=0.7)
                     
-                    cbar = plt.colorbar(cf, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
-                    cbar.set_label("Probabilità (%)", fontweight='bold')
+                # --- LEGENDA SEMPRE VISIBILE ---
+                sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+                sm.set_array([])
+                cbar = plt.colorbar(sm, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
+                cbar.set_label("Probabilità (%)", fontweight='bold')
 
                 for name, (lo, la, col) in cities.items():
                     ax.plot(lo, la, marker='o', color=col, markersize=5 if col=='black' else 7, transform=ccrs.PlateCarree())
-                    # <-- RIGA CORRETTA CON PathEffects -->
                     ax.text(lo + 0.015, la + 0.015, name, color=col, fontsize=8, fontweight='bold', transform=ccrs.PlateCarree(), path_effects=[PathEffects.withStroke(linewidth=2, foreground='white')])
 
                 start_local = dt_run_local + timedelta(hours=h-1)
