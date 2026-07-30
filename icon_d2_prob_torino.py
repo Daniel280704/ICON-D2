@@ -278,7 +278,7 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 lat_crop = lat_vals[domain_mask]
                 prob_crop = prob_vals[domain_mask]
 
-                fig = plt.figure(figsize=(16, 12))
+                fig = plt.figure(figsize=(16, 16))
                 ax = plt.axes(projection=ccrs.Mercator())
                 ax.set_extent(domain, crs=ccrs.PlateCarree())
 
