@@ -18,7 +18,7 @@ import warnings
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import cartopy.io.shapereader as shpreader
-import cartopy.io.img_tiles as cimgt # Modulo Google Tiles aggiunto
+import cartopy.io.img_tiles as cimgt
 import xarray as xr
 
 import earthkit.data
@@ -240,27 +240,6 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
     if os.path.exists(shp_path):
         prov_feature = cfeature.ShapelyFeature(shpreader.Reader(shp_path).geometries(), ccrs.PlateCarree(), edgecolor='black', facecolor='none', linewidth=0.5, linestyle=':')
 
-    cities = {
-        "Torino": (7.686, 45.070, "red"),
-        "Rivoli": (7.516, 45.069, "red"),
-        "Ivrea": (7.876, 45.467, "black"),
-        "Cuorgnè": (7.650, 45.390, "black"),
-        "Lanzo": (7.481, 45.272, "black"),
-        "Rivarolo": (7.721, 45.331, "black"),
-        "Ciriè": (7.602, 45.234, "black"),
-        "Venaria": (7.628, 45.122, "black"),
-        "Volpiano": (7.778, 45.201, "black"),
-        "Chivasso": (7.888, 45.190, "black"),
-        "Settimo": (7.766, 45.138, "black"),
-        "Avigliana": (7.397, 45.079, "black"),
-        "Chieri": (7.822, 45.011, "black"),
-        "Moncalieri": (7.682, 45.000, "black"),
-        "Carignano": (7.674, 44.906, "black"),
-        "Pinerolo": (7.333, 44.883, "black"),
-        "Susa": (7.045, 45.141, "black"),
-        "Carmagnola": (7.716, 44.848, "black")
-    }
-
     for block_name, ore_list in blocchi.items():
         print(f"\nGenerazione album probabilità: {block_name}")
         percorsi_foto = []
@@ -306,7 +285,9 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 # --- IMPLEMENTAZIONE GOOGLE MAPS HD ---
                 # lyrs=p : Terrain/Physical + Strade/Autostrade + Fiumi
                 tiler = cimgt.GoogleTiles(url="https://mt0.google.com/vt/lyrs=p&hl=it&x={x}&y={y}&z={z}")
-                ax.add_image(tiler, 11) # Zoom livello 11 (dettaglio eccellente per scala provinciale)
+                
+                # AUMENTATO ZOOM DA 11 A 12 PER MAGGIORE NITIDEZZA
+                ax.add_image(tiler, 12) 
                 
                 ax.add_feature(regions_feature)
                 if prov_feature: ax.add_feature(prov_feature)
@@ -327,10 +308,6 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 sm.set_array([])
                 cbar = plt.colorbar(sm, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
                 cbar.set_label("Probabilità (%)", fontweight='bold')
-
-                for name, (lo, la, col) in cities.items():
-                    ax.plot(lo, la, marker='o', color=col, markersize=5 if col=='black' else 7, transform=ccrs.PlateCarree())
-                    ax.text(lo + 0.015, la + 0.015, name, color=col, fontsize=8, fontweight='bold', transform=ccrs.PlateCarree(), path_effects=[PathEffects.withStroke(linewidth=2, foreground='white')])
 
                 start_local = dt_run_local + timedelta(hours=h-1)
                 end_local = dt_run_local + timedelta(hours=h)
