@@ -107,9 +107,6 @@ def estrai_limiti_run(hourly_data: dict, ref_param: str, utc_offset_sec: int) ->
 
 
 def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
-    """
-    Scarica l'accumulo sulla GRIGLIA NATIVA ICOSAEDRALE corretta per l'Ensemble.
-    """
     run_hour_syn = dt_run_utc.hour          
     run_hour = f"{run_hour_syn:02d}"
     date_hour = dt_run_utc.strftime('%Y%m%d%H')
@@ -163,7 +160,6 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
 def invia_album_telegram(file_paths: list, caption: str):
     token = os.getenv("TELEGRAM_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    # Utilizzo del THREAD ID 2 come richiesto
     thread_id = os.getenv("TELEGRAM_THREAD_ID_2")
 
     if not token or not chat_id: return
@@ -234,7 +230,6 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
     xmin, xmax, ymin, ymax = 6.0, 10.5, 43.5, 46.8
     domain = [xmin, xmax, ymin, ymax]
 
-    # Scala dei livelli e palette dei colori fornita
     my_levels = [0.1, 0.2, 0.5, 1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 40, 50, 75, 100, 150, 200]
     my_colors = [
         "#e6f2ff", "#99ccff", "#3399ff", "#004cff", "#66e666", "#33cc33", 
@@ -276,13 +271,20 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 prev_tot = curr_tot
                 prev_step_idx = h
 
-                # --- Calcolo della Media degli Scenari (Ensemble Mean) ---
                 prec_mean_xr = prec_oraria.mean(dim="eps")
                 
-                # Estraiamo gli array monodimensionali
                 lat_vals = prec_mean_xr['latitude'].values
                 lon_vals = prec_mean_xr['longitude'].values
                 mean_vals = prec_mean_xr.values
+
+                # Aggiungiamo un margine per il crop
+                margin = 0.1
+                domain_mask = (lon_vals >= xmin - margin) & (lon_vals <= xmax + margin) & \
+                              (lat_vals >= ymin - margin) & (lat_vals <= ymax + margin)
+                
+                lon_crop = lon_vals[domain_mask]
+                lat_crop = lat_vals[domain_mask]
+                mean_crop = mean_vals[domain_mask]
 
                 fig = plt.figure(figsize=(10, 8))
                 ax = plt.axes(projection=ccrs.Mercator())
@@ -294,23 +296,18 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                     ax.coastlines(resolution='10m')
                     ax.add_feature(cfeature.BORDERS)
 
-                # Mappatura dei livelli e colori
                 cmap = ListedColormap(my_colors)
                 norm = BoundaryNorm(my_levels, cmap.N)
 
-                # Filtro soglia minima a 0.1 mm/h
-                mask = mean_vals >= 0.1
-                
-                if np.any(mask):
-                    sc = ax.scatter(lon_vals[mask], lat_vals[mask], 
-                                    c=mean_vals[mask], cmap=cmap, norm=norm,
-                                    s=4, marker='s', transform=ccrs.PlateCarree(),
-                                    edgecolors='none')
+                # --- MODIFICA: Sostituzione di ax.scatter con ax.tricontourf per l'effetto "macchie" ---
+                if np.max(mean_crop) >= 0.1:
+                    cf = ax.tricontourf(lon_crop, lat_crop, mean_crop, 
+                                        levels=my_levels, cmap=cmap, norm=norm,
+                                        transform=ccrs.PlateCarree(), alpha=1.0)
                     
-                    cbar = plt.colorbar(sc, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
+                    cbar = plt.colorbar(cf, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
                     cbar.set_label("Precipitazione Oraria Media (mm/h)", fontweight='bold')
 
-                # Aggiunta principali città
                 ax.plot(7.51, 45.07, marker='o', color='brown', markersize=6, transform=ccrs.PlateCarree())
                 for lo, la, sig in zip(lons, lats, sigle):
                     ax.plot(lo, la, marker='o', color='black', markersize=3, transform=ccrs.PlateCarree())
