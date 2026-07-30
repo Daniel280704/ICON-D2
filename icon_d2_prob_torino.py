@@ -264,8 +264,8 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 prev_tot = curr_tot
                 prev_step_idx = h
 
-                # Estrazione coordinate
                 prob_xr = (prec_oraria >= 0.5).astype(float).mean(dim="eps") * 100
+                
                 lat_vals = prob_xr['latitude'].values
                 lon_vals = prob_xr['longitude'].values
                 prob_vals = prob_xr.values
@@ -278,13 +278,13 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 lat_crop = lat_vals[domain_mask]
                 prob_crop = prob_vals[domain_mask]
 
-                # --- MODIFICA 1: FIGURA MOLTO PIÙ GRANDE (16x12) PER ACCOGLIERE I DATI HIGH-RES ---
                 fig = plt.figure(figsize=(16, 12))
                 ax = plt.axes(projection=ccrs.Mercator())
                 ax.set_extent(domain, crs=ccrs.PlateCarree())
 
-                # IMPLEMENTAZIONE GOOGLE MAPS HD
-                tiler = cimgt.GoogleTiles(url="https://mt0.google.com/vt/lyrs=p&hl=it&x={x}&y={y}&z={z}")
+                # --- IMPLEMENTAZIONE GOOGLE MAPS HD: SOLO FISICA ---
+                # Modificato lyrs=p in lyrs=t (Solo Terrain, nessuna etichetta, nessuna strada)
+                tiler = cimgt.GoogleTiles(url="https://mt0.google.com/vt/lyrs=t&hl=it&x={x}&y={y}&z={z}")
                 ax.add_image(tiler, 12) 
                 
                 ax.add_feature(regions_feature)
@@ -301,7 +301,6 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                                         levels=my_levels, cmap=cmap, norm=norm,
                                         transform=ccrs.PlateCarree(), alpha=0.7)
                     
-                # LEGENDA FISSA E CENTRATA
                 sm = cm.ScalarMappable(cmap=cmap, norm=norm)
                 sm.set_array([])
                 cbar = plt.colorbar(sm, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
@@ -311,13 +310,10 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 end_local = dt_run_local + timedelta(hours=h)
                 str_valida = f"{start_local.strftime('%H:%M')} - {end_local.strftime('%H:%M del %d/%m')}"
 
-                # Aumentato il font del titolo per bilanciare l'immagine più grande
                 title = f"ICON-D2 EPS - Probabilità Pioggia >= 0.5 mm/h (%)\nRun: {dt_run_utc.strftime('%d/%m/%Y %H:%M UTC')} | {str_valida}"
                 plt.title(title, fontweight='bold', fontsize=16)
 
                 filename = f"oraria_to_{h}.png"
-                
-                # --- MODIFICA 2: DPI PORTATO A 300 PER RENDERE IL TESTO GOOGLE NITIDISSIMO ---
                 plt.savefig(filename, dpi=300, bbox_inches='tight')
                 plt.close(fig)
                 percorsi_foto.append(filename)
