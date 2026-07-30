@@ -282,13 +282,12 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 ax = plt.axes(projection=ccrs.Mercator())
                 ax.set_extent(domain, crs=ccrs.PlateCarree())
 
-                # --- IMPLEMENTAZIONE GOOGLE MAPS HD: FISICA + STRADE/ETICHETTE (ZOOM MINORE) ---
-                # Rimesso lyrs=p per avere tutto
+                # --- IMPLEMENTAZIONE GOOGLE MAPS HD ---
                 tiler = cimgt.GoogleTiles(url="https://mt0.google.com/vt/lyrs=p&hl=it&x={x}&y={y}&z={z}")
                 
-                # --- MODIFICA: ZOOM RIDOTTO A 10 ---
-                # Questo chiederà a Google i tasselli di livello 10, che mostrano solo i centri urbani più grossi e le arterie principali, riducendo l'affollamento di etichette.
-                ax.add_image(tiler, 10) 
+                # --- MODIFICA: ZOOM RIDOTTO A 9 ---
+                # Questo chiederà a Google i tasselli di livello 9
+                ax.add_image(tiler, 9) 
                 
                 ax.add_feature(regions_feature)
                 if prov_feature: ax.add_feature(prov_feature)
