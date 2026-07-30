@@ -9,6 +9,7 @@ import bz2
 import tempfile
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patheffects as PathEffects # <-- IMPORT AGGIUNTO
 from matplotlib.colors import BoundaryNorm, ListedColormap
 from datetime import datetime, timedelta, timezone
 import warnings
@@ -237,7 +238,6 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
     if os.path.exists(shp_path):
         prov_feature = cfeature.ShapelyFeature(shpreader.Reader(shp_path).geometries(), ccrs.PlateCarree(), edgecolor='black', facecolor='none', linewidth=0.5, linestyle=':')
 
-    # AGGIUNTO: Tutte le città richieste
     cities = {
         "Torino": (7.686, 45.070, "red"),
         "Rivoli": (7.516, 45.069, "red"),
@@ -288,12 +288,19 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 lat_vals = prob_xr['latitude'].values
                 lon_vals = prob_xr['longitude'].values
                 prob_vals = prob_xr.values
+                
+                margin = 0.1
+                domain_mask = (lon_vals >= xmin - margin) & (lon_vals <= xmax + margin) & \
+                              (lat_vals >= ymin - margin) & (lat_vals <= ymax + margin)
+                
+                lon_crop = lon_vals[domain_mask]
+                lat_crop = lat_vals[domain_mask]
+                prob_crop = prob_vals[domain_mask]
 
                 fig = plt.figure(figsize=(10, 8))
                 ax = plt.axes(projection=ccrs.Mercator())
                 ax.set_extent(domain, crs=ccrs.PlateCarree())
 
-                # AGGIUNTO: Background topografico 
                 ax.stock_img()
                 
                 ax.add_feature(regions_feature)
@@ -305,22 +312,18 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 cmap = ListedColormap(my_colors)
                 norm = BoundaryNorm(my_levels, cmap.N)
 
-                mask = prob_vals >= 10
-                
-                if np.any(mask):
-                    # NOTA: alpha=0.7 per far intravedere l'orografia sotto le probabilità
-                    sc = ax.scatter(lon_vals[mask], lat_vals[mask], 
-                                    c=prob_vals[mask], cmap=cmap, norm=norm,
-                                    s=10, marker='s', transform=ccrs.PlateCarree(),
-                                    edgecolors='none', alpha=0.7)
+                if np.max(prob_crop) >= 10:
+                    cf = ax.tricontourf(lon_crop, lat_crop, prob_crop, 
+                                        levels=my_levels, cmap=cmap, norm=norm,
+                                        transform=ccrs.PlateCarree(), alpha=0.7)
                     
-                    cbar = plt.colorbar(sc, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
+                    cbar = plt.colorbar(cf, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
                     cbar.set_label("Probabilità (%)", fontweight='bold')
 
                 for name, (lo, la, col) in cities.items():
                     ax.plot(lo, la, marker='o', color=col, markersize=5 if col=='black' else 7, transform=ccrs.PlateCarree())
-                    # Font più piccolo con bordo bianco per massima leggibilità su orografia
-                    ax.text(lo + 0.015, la + 0.015, name, color=col, fontsize=8, fontweight='bold', transform=ccrs.PlateCarree(), path_effects=[plt.matplotlib.patheffects.withStroke(linewidth=2, foreground='white')])
+                    # <-- RIGA CORRETTA CON PathEffects -->
+                    ax.text(lo + 0.015, la + 0.015, name, color=col, fontsize=8, fontweight='bold', transform=ccrs.PlateCarree(), path_effects=[PathEffects.withStroke(linewidth=2, foreground='white')])
 
                 start_local = dt_run_local + timedelta(hours=h-1)
                 end_local = dt_run_local + timedelta(hours=h)
