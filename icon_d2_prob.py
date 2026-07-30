@@ -9,6 +9,8 @@ import bz2
 import tempfile
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patheffects as PathEffects
+import matplotlib.cm as cm
 from matplotlib.colors import BoundaryNorm, ListedColormap
 from datetime import datetime, timedelta, timezone
 import warnings
@@ -16,6 +18,7 @@ import warnings
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import cartopy.io.shapereader as shpreader
+import cartopy.io.img_tiles as cimgt
 import xarray as xr
 
 import earthkit.data
@@ -241,10 +244,6 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
     if os.path.exists(shp_path):
         prov_feature = cfeature.ShapelyFeature(shpreader.Reader(shp_path).geometries(), ccrs.PlateCarree(), edgecolor='black', facecolor='none', linewidth=0.5, linestyle=':')
 
-    lats = [45.07, 44.38, 44.90, 44.91, 45.32, 45.45, 45.56, 45.92]
-    lons = [7.68,  7.55,  8.20,  8.61,  8.42,  8.61,  8.05,  8.55]
-    sigle = ["TO", "CN", "AT", "AL", "VC", "NO", "BI", "VB"]
-
     for block_name, ore_list in blocchi.items():
         print(f"\nGenerazione album probabilità: {block_name}")
         percorsi_foto = []
@@ -269,56 +268,57 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 prev_tot = curr_tot
                 prev_step_idx = h
 
-                # --- Calcolo Probabilità e Disegno Diretto ---
                 prob_xr = (prec_oraria >= 0.5).astype(float).mean(dim="eps") * 100
                 
-                # Estraiamo gli array monodimensionali esatti dell'icosaedro
                 lat_vals = prob_xr['latitude'].values
                 lon_vals = prob_xr['longitude'].values
                 prob_vals = prob_xr.values
 
-                fig = plt.figure(figsize=(10, 8))
+                margin = 0.1
+                domain_mask = (lon_vals >= xmin - margin) & (lon_vals <= xmax + margin) & \
+                              (lat_vals >= ymin - margin) & (lat_vals <= ymax + margin)
+                
+                lon_crop = lon_vals[domain_mask]
+                lat_crop = lat_vals[domain_mask]
+                prob_crop = prob_vals[domain_mask]
+
+                # Figura ingrandita
+                fig = plt.figure(figsize=(16, 12))
                 ax = plt.axes(projection=ccrs.Mercator())
                 ax.set_extent(domain, crs=ccrs.PlateCarree())
 
+                # Aggiunta Google Tiles con zoom 8 (perfetto per tutto il NW)
+                tiler = cimgt.GoogleTiles(url="https://mt0.google.com/vt/lyrs=p&hl=it&x={x}&y={y}&z={z}")
+                ax.add_image(tiler, 8) 
+                
                 ax.add_feature(regions_feature)
                 if prov_feature: ax.add_feature(prov_feature)
                 else: 
                     ax.coastlines(resolution='10m')
                     ax.add_feature(cfeature.BORDERS)
 
-                # Prepariamo la colormap in base ai tuoi livelli
                 cmap = ListedColormap(my_colors)
                 norm = BoundaryNorm(my_levels, cmap.N)
-
-                # Mascheriamo per alleggerire enormemente il rendering
-                mask = prob_vals >= 10
                 
-                if np.any(mask):
-                    # Lo scatter plot per 500k+ punti è la via più veloce e pulita
-                    sc = ax.scatter(lon_vals[mask], lat_vals[mask], 
-                                    c=prob_vals[mask], cmap=cmap, norm=norm,
-                                    s=4, marker='s', transform=ccrs.PlateCarree(),
-                                    edgecolors='none')
-                    
-                    cbar = plt.colorbar(sc, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
-                    cbar.set_label("Probabilità (%)", fontweight='bold')
+                if np.max(prob_crop) >= 10:
+                    cf = ax.tricontourf(lon_crop, lat_crop, prob_crop, 
+                                        levels=my_levels, cmap=cmap, norm=norm,
+                                        transform=ccrs.PlateCarree(), alpha=0.7)
 
-                # Aggiunta città
-                ax.plot(7.51, 45.07, marker='o', color='brown', markersize=6, transform=ccrs.PlateCarree())
-                for lo, la, sig in zip(lons, lats, sigle):
-                    ax.plot(lo, la, marker='o', color='black', markersize=3, transform=ccrs.PlateCarree())
-                    ax.text(lo + 0.05, la + 0.05, sig, color='black', fontsize=9, fontweight='bold', transform=ccrs.PlateCarree())
+                sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+                sm.set_array([])
+                cbar = plt.colorbar(sm, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
+                cbar.set_label("Probabilità (%)", fontweight='bold')
 
                 start_local = dt_run_local + timedelta(hours=h-1)
                 end_local = dt_run_local + timedelta(hours=h)
                 str_valida = f"{start_local.strftime('%H:%M')} - {end_local.strftime('%H:%M del %d/%m')}"
 
                 title = f"ICON-D2 EPS - Probabilità Pioggia >= 0.5 mm/h (%)\nRun: {dt_run_utc.strftime('%d/%m/%Y %H:%M UTC')} | {str_valida}"
-                plt.title(title, fontweight='bold')
+                plt.title(title, fontweight='bold', fontsize=16)
 
                 filename = f"oraria_{h}.png"
-                plt.savefig(filename, dpi=200, bbox_inches='tight')
+                plt.savefig(filename, dpi=300, bbox_inches='tight')
                 plt.close(fig)
                 percorsi_foto.append(filename)
 
