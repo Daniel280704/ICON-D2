@@ -28,7 +28,6 @@ config.set("cache-policy", "temporary")
 LATITUDE = 45.07
 LONGITUDE = 7.68
 
-# Rinominato per non fare conflitto se gira sulla stessa macchina di quello regionale
 FILE_LAST_HOUR = "ultima_ora_icond2_prob_to.txt" 
 RUN_DURATION = 48 
 START_DELAY = 0
@@ -160,8 +159,7 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
 def invia_album_telegram(file_paths: list, caption: str):
     token = os.getenv("TELEGRAM_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    # MODIFICATO per l'uso del thread specifico
-    thread_id = os.getenv("TELEGRAM_THREAD_ID_3873") 
+    thread_id = os.getenv("TELEGRAM_THREAD_ID_3873")
 
     if not token or not chat_id: return
 
@@ -228,7 +226,6 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
     dt_run_local = dt_run_utc.astimezone(rome_tz)
     blocchi = raggruppa_in_blocchi(dt_run_local)
 
-    # MODIFICATO: Bounding Box centrata sul Torinese
     xmin, xmax, ymin, ymax = 6.6, 8.2, 44.7, 45.6
     my_levels = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
     my_colors = ["#a0e6ff", "#00a0ff", "#00ff00", "#ffff00", "#ffaa00", "#ff0000", "#cc0000", "#ff00ff", "#800080"]
@@ -240,16 +237,26 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
     if os.path.exists(shp_path):
         prov_feature = cfeature.ShapelyFeature(shpreader.Reader(shp_path).geometries(), ccrs.PlateCarree(), edgecolor='black', facecolor='none', linewidth=0.5, linestyle=':')
 
-    # MODIFICATO: Coordinate per Torino e le principali città del Torinese
+    # AGGIUNTO: Tutte le città richieste
     cities = {
         "Torino": (7.686, 45.070, "red"),
         "Rivoli": (7.516, 45.069, "red"),
-        "Pinerolo": (7.333, 44.883, "black"),
-        "Chivasso": (7.888, 45.190, "black"),
         "Ivrea": (7.876, 45.467, "black"),
+        "Cuorgnè": (7.650, 45.390, "black"),
+        "Lanzo": (7.481, 45.272, "black"),
+        "Rivarolo": (7.721, 45.331, "black"),
+        "Ciriè": (7.602, 45.234, "black"),
+        "Venaria": (7.628, 45.122, "black"),
+        "Volpiano": (7.778, 45.201, "black"),
+        "Chivasso": (7.888, 45.190, "black"),
+        "Settimo": (7.766, 45.138, "black"),
+        "Avigliana": (7.397, 45.079, "black"),
+        "Chieri": (7.822, 45.011, "black"),
+        "Moncalieri": (7.682, 45.000, "black"),
+        "Carignano": (7.674, 44.906, "black"),
+        "Pinerolo": (7.333, 44.883, "black"),
         "Susa": (7.045, 45.141, "black"),
-        "Carmagnola": (7.716, 44.848, "black"),
-        "Cuorgnè": (7.650, 45.390, "black")
+        "Carmagnola": (7.716, 44.848, "black")
     }
 
     for block_name, ore_list in blocchi.items():
@@ -286,6 +293,9 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 ax = plt.axes(projection=ccrs.Mercator())
                 ax.set_extent(domain, crs=ccrs.PlateCarree())
 
+                # AGGIUNTO: Background topografico 
+                ax.stock_img()
+                
                 ax.add_feature(regions_feature)
                 if prov_feature: ax.add_feature(prov_feature)
                 else: 
@@ -298,21 +308,19 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 mask = prob_vals >= 10
                 
                 if np.any(mask):
-                    # Grandezza dei quadratini aumentata a 10 per via dello zoom elevato
+                    # NOTA: alpha=0.7 per far intravedere l'orografia sotto le probabilità
                     sc = ax.scatter(lon_vals[mask], lat_vals[mask], 
                                     c=prob_vals[mask], cmap=cmap, norm=norm,
                                     s=10, marker='s', transform=ccrs.PlateCarree(),
-                                    edgecolors='none')
+                                    edgecolors='none', alpha=0.7)
                     
                     cbar = plt.colorbar(sc, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
                     cbar.set_label("Probabilità (%)", fontweight='bold')
 
-                # MODIFICATO: Aggiunta delle città in rosso e in nero sulla mappa
                 for name, (lo, la, col) in cities.items():
-                    # Pallini città, leggermente più grandi per i neri 
                     ax.plot(lo, la, marker='o', color=col, markersize=5 if col=='black' else 7, transform=ccrs.PlateCarree())
-                    # Etichette collocate poco a lato per non sovrapporsi col pallino
-                    ax.text(lo + 0.02, la + 0.015, name, color=col, fontsize=10, fontweight='bold', transform=ccrs.PlateCarree())
+                    # Font più piccolo con bordo bianco per massima leggibilità su orografia
+                    ax.text(lo + 0.015, la + 0.015, name, color=col, fontsize=8, fontweight='bold', transform=ccrs.PlateCarree(), path_effects=[plt.matplotlib.patheffects.withStroke(linewidth=2, foreground='white')])
 
                 start_local = dt_run_local + timedelta(hours=h-1)
                 end_local = dt_run_local + timedelta(hours=h)
