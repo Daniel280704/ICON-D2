@@ -107,15 +107,11 @@ def estrai_limiti_run(hourly_data: dict, ref_param: str, utc_offset_sec: int) ->
 
 
 def scarica_step_lpi(dt_run_utc, h_step, max_retries=3):
-    """
-    Scarica il parametro LPI MAX sulla GRIGLIA NATIVA ICOSAEDRALE.
-    """
     run_hour_syn = dt_run_utc.hour          
     run_hour = f"{run_hour_syn:02d}"
     date_hour = dt_run_utc.strftime('%Y%m%d%H')
     step_str = f"{h_step:03d}"
     
-    # URL dedicato a lpi_max
     url_lpi = f"https://opendata.dwd.de/weather/nwp/icon-d2-eps/grib/{run_hour}/lpi_max/icon-d2-eps_germany_icosahedral_single-level_{date_hour}_{step_str}_2d_lpi_max.grib2.bz2"
 
     def _download_one(url: str):
@@ -152,7 +148,6 @@ def scarica_step_lpi(dt_run_utc, h_step, max_retries=3):
 def invia_album_telegram(file_paths: list, caption: str):
     token = os.getenv("TELEGRAM_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    # Thread ID 882 impostato da Action
     thread_id = os.getenv("TELEGRAM_THREAD_ID_882")
 
     if not token or not chat_id: return
@@ -195,23 +190,17 @@ def invia_album_telegram(file_paths: list, caption: str):
 
 def raggruppa_in_blocchi(dt_run_local: datetime) -> dict:
     blocchi = {}
-    for h in range(1, 49): 
-        dt_target = dt_run_local + timedelta(hours=h)
-        date_str = dt_target.date().strftime("%Y-%m-%d")
-        hour = dt_target.hour
-
-        if hour == 0:
-            date_str = (dt_target.date() - timedelta(days=1)).strftime("%Y-%m-%d")
-            b_name = "18-24"
-        elif 1 <= hour <= 6: b_name = "00-06"
-        elif 7 <= hour <= 12: b_name = "06-12"
-        elif 13 <= hour <= 18: b_name = "12-18"
-        else: b_name = "18-24"
-
-        key = f"{date_str} (Fascia {b_name})"
+    for h_start in range(1, 49, 3): 
+        h_end = min(h_start + 2, 48)
+        
+        # Basiamo il giorno di appartenenza sull'inizio del blocco di 3 ore
+        dt_target = dt_run_local + timedelta(hours=h_start)
+        date_str = dt_target.strftime("%d-%m-%Y")
+        
+        key = f"Giornata del {date_str}"
         if key not in blocchi:
             blocchi[key] = []
-        blocchi[key].append(h)
+        blocchi[key].append(range(h_start, h_end + 1))
     return blocchi
 
 
@@ -223,7 +212,6 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
     xmin, xmax, ymin, ymax = 6.0, 10.5, 43.5, 46.8
     domain = [xmin, xmax, ymin, ymax]
 
-    # Scala dei livelli (con 50 come tetto per avere 9 intervalli) e palette richiesta
     my_levels = [1, 3, 6, 9, 12, 15, 20, 25, 30, 50]
     my_colors = ["#a0e6ff", "#00a0ff", "#00ff00", "#ffff00", "#ffaa00", "#ff0000", "#cc0000", "#ff00ff", "#800080"]
     
@@ -237,22 +225,27 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
     lons = [7.68,  7.55,  8.20,  8.61,  8.42,  8.61,  8.05,  8.55]
     sigle = ["TO", "CN", "AT", "AL", "VC", "NO", "BI", "VB"]
 
-    for block_name, ore_list in blocchi.items():
+    for block_name, windows in blocchi.items():
         print(f"\nGenerazione album LPI: {block_name}")
         percorsi_foto = []
 
-        for h in ore_list:
+        for w in windows:
+            h_start = w[0]
+            h_end = w[-1]
             try:
-                print(f"  ⚡ Elaborazione LPI Max H={h}...")
-                curr_lpi = scarica_step_lpi(dt_run_utc, h)
-
-                # --- Calcolo della Media degli Scenari (Ensemble Mean) ---
-                lpi_mean_xr = curr_lpi.mean(dim="eps")
+                print(f"  ⚡ Elaborazione LPI Max H={h_start}-{h_end}...")
                 
-                # Estraiamo gli array monodimensionali
-                lat_vals = lpi_mean_xr['latitude'].values
-                lon_vals = lpi_mean_xr['longitude'].values
-                mean_vals = lpi_mean_xr.values
+                datasets = []
+                for hr in w:
+                    datasets.append(scarica_step_lpi(dt_run_utc, hr))
+                
+                combined = xr.concat(datasets, dim="time")
+                max_3h_xr = combined.max(dim="time")
+                mean_xr = max_3h_xr.mean(dim="eps")
+                
+                lat_vals = mean_xr['latitude'].values
+                lon_vals = mean_xr['longitude'].values
+                mean_vals = mean_xr.values
 
                 fig = plt.figure(figsize=(10, 8))
                 ax = plt.axes(projection=ccrs.Mercator())
@@ -264,11 +257,9 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                     ax.coastlines(resolution='10m')
                     ax.add_feature(cfeature.BORDERS)
 
-                # Mappatura dei livelli e colori
                 cmap = ListedColormap(my_colors)
                 norm = BoundaryNorm(my_levels, cmap.N)
 
-                # Filtro soglia minima LPI a 1
                 mask = mean_vals >= 1
                 
                 if np.any(mask):
@@ -280,30 +271,29 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                     cbar = plt.colorbar(sc, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
                     cbar.set_label("LPI Max Medio (J/kg)", fontweight='bold')
 
-                # Aggiunta principali città
                 ax.plot(7.51, 45.07, marker='o', color='brown', markersize=6, transform=ccrs.PlateCarree())
                 for lo, la, sig in zip(lons, lats, sigle):
                     ax.plot(lo, la, marker='o', color='black', markersize=3, transform=ccrs.PlateCarree())
                     ax.text(lo + 0.05, la + 0.05, sig, color='black', fontsize=9, fontweight='bold', transform=ccrs.PlateCarree())
 
-                start_local = dt_run_local + timedelta(hours=h-1)
-                end_local = dt_run_local + timedelta(hours=h)
-                str_valida = f"{start_local.strftime('%H:%M')} - {end_local.strftime('%H:%M del %d/%m')}"
+                start_local = dt_run_local + timedelta(hours=h_start-1)
+                end_local = dt_run_local + timedelta(hours=h_end)
+                str_valida = f"{start_local.strftime('%H:%M')} - {end_local.strftime('%H:%M del %d/%m')} (+{h_start}-{h_end}h)"
 
-                title = f"ICON-D2 EPS - LPI Max Medio (J/kg)\nRun: {dt_run_utc.strftime('%d/%m/%Y %H:%M UTC')} | {str_valida}"
+                title = f"ICON-D2 EPS - LPI Max Medio (J/kg) [Max 3h]\nRun: {dt_run_utc.strftime('%d/%m/%Y %H:%M UTC')} | {str_valida}"
                 plt.title(title, fontweight='bold')
 
-                filename = f"lpi_{h}.png"
+                filename = f"lpi_{h_start}_{h_end}.png"
                 plt.savefig(filename, dpi=200, bbox_inches='tight')
                 plt.close(fig)
                 percorsi_foto.append(filename)
 
             except Exception as e:
-                print(f"  ❌ Errore elaborando l'ora {h}: {e}")
+                print(f"  ❌ Errore elaborando ore {h_start}-{h_end}: {e}")
                 continue
 
         if percorsi_foto:
-            caption_album = f"ICON-D2 EPS: LPI Max Medio\n{block_name}\nRun {nome_run}"
+            caption_album = f"ICON-D2 EPS: LPI Max Medio [Max 3h]\n{block_name}\nRun {nome_run}"
             invia_album_telegram(percorsi_foto, caption_album)
             
             for f in percorsi_foto:
