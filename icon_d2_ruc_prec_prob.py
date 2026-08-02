@@ -278,8 +278,8 @@ def genera_album_probabilita_precipitazioni(session: requests.Session, dt_run_ut
                 start_local = dt_target_local - timedelta(hours=1)
                 str_valida = f"{start_local.strftime('%H:%M')} - {dt_target_local.strftime('%H:%M del %d/%m/%Y')}"
 
-                title = f"ICON-D2-RUC EPS - Probabilità Precipitazione > 0.5 mm/h
-Run: {run_str} UTC | Valido: {str_valida}"
+                # FIX: Stringa su un'unica riga con il "\n" per andare a capo
+                title = f"ICON-D2-RUC EPS - Probabilità Precipitazione > 0.5 mm/h\nRun: {run_str} UTC | Valido: {str_valida}"
                 plt.title(title, fontweight='bold')
 
                 filename = f"ruc_prec_prob_{h}.png"
@@ -289,9 +289,8 @@ Run: {run_str} UTC | Valido: {str_valida}"
 
         if percorsi_foto:
             nome_run = run_str.split('T')[-1].replace(':00', 'Z')
-            caption_album = f"ICON-D2-RUC EPS: Probabilità Precipitazione (> 0.5 mm/h)
-{block_name}
-Run {nome_run}"
+            # FIX: Stringa su un'unica riga con il "\n" per andare a capo
+            caption_album = f"ICON-D2-RUC EPS: Probabilità Precipitazione (> 0.5 mm/h)\n{block_name}\nRun {nome_run}"
             invia_album_telegram(percorsi_foto, caption_album)
             
             for f in percorsi_foto:
