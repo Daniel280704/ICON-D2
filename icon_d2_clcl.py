@@ -1,274 +1,144 @@
-import os
-import sys
-import time
-import json
-import requests
-import urllib3
-import pytz
-import bz2
-import tempfile
+import os, sys, time, json, requests, urllib3, pytz, bz2, tempfile
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import BoundaryNorm, ListedColormap
 from datetime import datetime, timedelta, timezone
 import warnings
-
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import cartopy.io.shapereader as shpreader
 import xarray as xr
-
 import earthkit.data
 from earthkit.data import config
 
-warnings.filterwarnings('ignore')
-urllib3.disable_warnings()
-config.set("cache-policy", "temporary")
-
-LATITUDE = 45.07
-LONGITUDE = 7.54
-
-FILE_LAST_HOUR = "ultima_ora_icond2_clcl.txt" 
-RUN_DURATION = 48 
-START_DELAY = 0
+warnings.filterwarnings('ignore'); urllib3.disable_warnings(); config.set("cache-policy", "temporary")
+LATITUDE, LONGITUDE = 45.07, 7.54
+FILE_LAST_HOUR, RUN_DURATION, START_DELAY = "ultima_ora_icond2_clcl.txt", 48, 0
 
 def fetch_dati_con_retry() -> dict:
-    URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
-    params = {
-        "latitude": LATITUDE,
-        "longitude": LONGITUDE,
-        "hourly": "temperature_2m", 
-        "models": "dwd_icon_d2_eps_ensemble_mean",
-        "timezone": "Europe/Rome",
-        "past_days": 1,
-        "forecast_days": 3 
-    }
-    headers = {"User-Agent": "MeteoBot-ICOND2-Mappe/3.0"}
-    for tentativo in range(3):
+    URL, params = "https://ensemble-api.open-meteo.com/v1/ensemble", {"latitude": LATITUDE, "longitude": LONGITUDE, "hourly": "temperature_2m", "models": "dwd_icon_d2_eps_ensemble_mean", "timezone": "Europe/Rome", "past_days": 1, "forecast_days": 3}
+    for _ in range(3):
         try:
-            r = requests.get(URL, params=params, headers=headers, timeout=30)
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            print(f"⚠️ Errore API Open-Meteo: {e}")
-            time.sleep(15)
+            r = requests.get(URL, params=params, headers={"User-Agent": "MeteoBot-ICOND2-Mappe/3.0"}, timeout=30)
+            r.raise_for_status(); return r.json()
+        except: time.sleep(15)
     return {}
 
 def estrai_limiti_run(hourly_data: dict, ref_param: str, utc_offset_sec: int) -> tuple[bool, str, datetime]:
-    times = hourly_data.get("time", [])
-    mean_vals = hourly_data.get(ref_param, [])
-
+    times, mean_vals = hourly_data.get("time", []), hourly_data.get(ref_param, [])
     if not times or not mean_vals: return False, "", None
-
-    end_idx = -1
-    for i in range(len(mean_vals) - 1, -1, -1):
-        if mean_vals[i] is not None:
-            end_idx = i
-            break
-
+    end_idx = next((i for i in range(len(mean_vals)-1, -1, -1) if mean_vals[i] is not None), -1)
     if end_idx == -1: return False, "", None
-
     ultima_ora_valida_str = times[end_idx]
-
     dt_end_local = datetime.fromisoformat(ultima_ora_valida_str)
-    dt_end_utc = dt_end_local - timedelta(seconds=utc_offset_sec)
-    dt_run_utc_naive = dt_end_utc - timedelta(hours=RUN_DURATION)
-    dt_start_utc = dt_run_utc_naive + timedelta(hours=START_DELAY)
-
-    dt_start_local = dt_start_utc + timedelta(seconds=utc_offset_sec)
-    start_time_str = dt_start_local.strftime("%Y-%m-%dT%H:%M")
+    dt_run_utc_naive = dt_end_local - timedelta(seconds=utc_offset_sec) - timedelta(hours=RUN_DURATION)
+    dt_start_local = dt_run_utc_naive + timedelta(hours=START_DELAY) + timedelta(seconds=utc_offset_sec)
     nome_run = dt_run_utc_naive.strftime("%H") + "Z"
-
-    try:
-        start_idx = times.index(start_time_str)
-    except ValueError:
-        return False, "", None
-
-    expected_points = RUN_DURATION - START_DELAY + 1
-    actual_points = end_idx - start_idx + 1
-
-    if actual_points < expected_points:
-        print(f"⏳ Run {nome_run} in caricamento su Open-Meteo... ({actual_points}/{expected_points} ore)")
-        return False, "", None
-
+    try: start_idx = times.index(dt_start_local.strftime("%Y-%m-%dT%H:%M"))
+    except ValueError: return False, "", None
+    if (end_idx - start_idx + 1) < (RUN_DURATION - START_DELAY + 1): return False, "", None
     if os.path.exists(FILE_LAST_HOUR):
         with open(FILE_LAST_HOUR, "r") as f:
-            ultima_ora_salvata = f.read().strip()
-        if ultima_ora_valida_str <= ultima_ora_salvata:
-            print(f"✅ Run ICON-D2 EPS {nome_run} già elaborato per CLCL.")
-            return False, "", None
-
-    with open(FILE_LAST_HOUR, "w") as f:
-        f.write(ultima_ora_valida_str)
-
-    dt_run_utc = dt_run_utc_naive.replace(tzinfo=timezone.utc)
-    return True, nome_run, dt_run_utc
-
+            if ultima_ora_valida_str <= f.read().strip(): return False, "", None
+    with open(FILE_LAST_HOUR, "w") as f: f.write(ultima_ora_valida_str)
+    return True, nome_run, dt_run_utc_naive.replace(tzinfo=timezone.utc)
 
 def scarica_step_clcl(dt_run_utc, h_step, max_retries=3):
-    run_hour_syn = dt_run_utc.hour          
-    run_hour = f"{run_hour_syn:02d}"
-    date_hour = dt_run_utc.strftime('%Y%m%d%H')
-    step_str = f"{h_step:03d}"
-    
+    run_hour, date_hour, step_str = f"{dt_run_utc.hour:02d}", dt_run_utc.strftime('%Y%m%d%H'), f"{h_step:03d}"
     url = f"https://opendata.dwd.de/weather/nwp/icon-d2-eps/grib/{run_hour}/clcl/icon-d2-eps_germany_icosahedral_single-level_{date_hour}_{step_str}_2d_clcl.grib2.bz2"
-
     for tentativo in range(max_retries):
         try:
             r = requests.get(url, stream=True, timeout=30)
-            r.raise_for_status()
-            fd, temp_path = tempfile.mkstemp(suffix=".grib2")
+            r.raise_for_status(); fd, temp_path = tempfile.mkstemp(suffix=".grib2")
             with os.fdopen(fd, 'wb') as f_out:
                 decompressor = bz2.BZ2Decompressor()
                 for chunk in r.iter_content(chunk_size=8192):
                     if chunk: f_out.write(decompressor.decompress(chunk))
-            
             ds = earthkit.data.from_source("file", temp_path).to_xarray()
-            
             if 'member' in ds.dims: ds = ds.rename({'member': 'eps'})
             elif 'number' in ds.dims: ds = ds.rename({'number': 'eps'})
-
-            var_name = list(ds.data_vars)[0]
-            clcl_data = ds[var_name].compute()
-
-            ds.close()
+            data = ds[list(ds.data_vars)[0]].compute(); ds.close()
             try: os.remove(temp_path)
             except: pass
-
-            return clcl_data
-
+            return data
         except Exception as e:
             if tentativo == max_retries - 1: raise e
-            time.sleep(5 * (tentativo + 1))
-
+            time.sleep(5)
 
 def invia_album_telegram(file_paths: list, caption: str):
-    token = os.getenv("TELEGRAM_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    thread_id = os.getenv("TELEGRAM_THREAD_ID_6")
-
+    token, chat_id, thread_id = os.getenv("TELEGRAM_TOKEN"), os.getenv("TELEGRAM_CHAT_ID"), os.getenv("TELEGRAM_THREAD_ID_6")
     if not token or not chat_id: return
-
     if len(file_paths) == 1:
-        url = f"https://api.telegram.org/bot{token}/sendPhoto"
-        payload = {"chat_id": chat_id, "caption": caption}
-        if thread_id: payload["message_thread_id"] = thread_id
         try:
-            with open(file_paths[0], "rb") as photo:
-                requests.post(url, data=payload, files={"photo": photo})
-        except Exception as e:
-            print(f"Errore invio singola foto: {e}")
+            with open(file_paths[0], "rb") as f: requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", data={"chat_id": chat_id, "caption": caption, "message_thread_id": thread_id}, files={"photo": f})
+        except: pass
         return
-
-    url = f"https://api.telegram.org/bot{token}/sendMediaGroup"
-    media = []
-    files = {}
-
-    for idx, path in enumerate(file_paths):
-        media.append({
-            "type": "photo",
-            "media": f"attach://photo_{idx}",
-            "caption": caption if idx == 0 else ""
-        })
-        files[f"photo_{idx}"] = open(path, "rb")
-
-    payload = {"chat_id": chat_id, "media": json.dumps(media)}
-    if thread_id: payload["message_thread_id"] = thread_id
-
-    try:
-        requests.post(url, data=payload, files=files)
-        print(f"📸 Album Telegram CLCL inviato ({len(file_paths)} mappe).")
-    except Exception as e:
-        print(f"Errore invio album Telegram: {e}")
+    media = [{"type": "photo", "media": f"attach://photo_{i}", "caption": caption if i == 0 else ""} for i in range(len(file_paths))]
+    files = {f"photo_{i}": open(p, "rb") for i, p in enumerate(file_paths)}
+    try: requests.post(f"https://api.telegram.org/bot{token}/sendMediaGroup", data={"chat_id": chat_id, "media": json.dumps(media), "message_thread_id": thread_id}, files=files)
+    except: pass
     finally:
-        for f in files.values():
-            f.close()
-
+        for f in files.values(): f.close()
 
 def raggruppa_in_blocchi(dt_run_local: datetime) -> dict:
     blocchi = {}
     for h in range(1, 49): 
         dt_target = dt_run_local + timedelta(hours=h)
-        date_str = dt_target.date().strftime("%Y-%m-%d")
+        date_str = dt_target.strftime("%Y-%m-%d")
         hour = dt_target.hour
-
-        if hour == 0:
-            date_str = (dt_target.date() - timedelta(days=1)).strftime("%Y-%m-%d")
-            b_name = "18-24"
+        if hour == 0 or 18 <= hour <= 23: b_name, date_str = "18-24", (dt_target - (timedelta(days=1) if hour == 0 else timedelta(0))).strftime("%Y-%m-%d")
         elif 1 <= hour <= 6: b_name = "00-06"
         elif 7 <= hour <= 12: b_name = "06-12"
-        elif 13 <= hour <= 18: b_name = "12-18"
-        else: b_name = "18-24"
-
+        else: b_name = "12-18"
         key = f"{date_str} (Fascia {b_name})"
-        if key not in blocchi:
-            blocchi[key] = []
+        if key not in blocchi: blocchi[key] = []
         blocchi[key].append(h)
     return blocchi
-
 
 def genera_album_clcl(dt_run_utc: datetime, nome_run: str):
     rome_tz = pytz.timezone("Europe/Rome")
     dt_run_local = dt_run_utc.astimezone(rome_tz)
     blocchi = raggruppa_in_blocchi(dt_run_local)
-
-    xmin, xmax, ymin, ymax = 6.0, 10.5, 43.5, 46.8
-    domain = [xmin, xmax, ymin, ymax]
-
+    domain = [6.0, 10.5, 43.5, 46.8]
     my_levels = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
     my_colors = ["#4292c6", "#6baed6", "#9ecae1", "#c6dbef", "#deebf7", "#f0f0f0", "#d9d9d9", "#bdbdbd", "#969696", "#737373"]
-
     regions_feature = cfeature.NaturalEarthFeature('cultural', 'admin_1_states_provinces', '10m', edgecolor='black', facecolor='none', linewidth=1.5)
-    prov_feature = None
     shp_path = "shapefiles/ProvCM01012026_WGS84.shp"
-    if os.path.exists(shp_path):
-        prov_feature = cfeature.ShapelyFeature(shpreader.Reader(shp_path).geometries(), ccrs.PlateCarree(), edgecolor='black', facecolor='none', linewidth=0.5, linestyle=':')
-
-    lats = [45.07, 44.38, 44.90, 44.91, 45.32, 45.45, 45.56, 45.92]
-    lons = [7.68,  7.55,  8.20,  8.61,  8.42,  8.61,  8.05,  8.55]
-    sigle = ["TO", "CN", "AT", "AL", "VC", "NO", "BI", "VB"]
+    prov_feature = cfeature.ShapelyFeature(shpreader.Reader(shp_path).geometries(), ccrs.PlateCarree(), edgecolor='black', facecolor='none', linewidth=0.5, linestyle=':') if os.path.exists(shp_path) else None
+    lats, lons, sigle = [45.07, 44.38, 44.90, 44.91, 45.32, 45.45, 45.56, 45.92], [7.68, 7.55, 8.20, 8.61, 8.42, 8.61, 8.05, 8.55], ["TO", "CN", "AT", "AL", "VC", "NO", "BI", "VB"]
 
     for block_name, ore_list in blocchi.items():
         print(f"\nGenerazione album Nuvolosità Bassa media: {block_name}")
         percorsi_foto = []
-
         for h in ore_list:
             try:
-                print(f"  ⬇️  Elaborazione CLCL H={h}...")
                 curr_clcl = scarica_step_clcl(dt_run_utc, h)
                 clcl_mean_xr = curr_clcl.mean(dim="eps")
 
-                lat_vals = clcl_mean_xr['latitude'].values
-                lon_vals = clcl_mean_xr['longitude'].values
-                mean_vals = clcl_mean_xr.values
+                # --- SCHIACCIASASSI E RITAGLIO ---
+                lat_vals = clcl_mean_xr['latitude'].values.flatten()
+                lon_vals = clcl_mean_xr['longitude'].values.flatten()
+                mean_vals = clcl_mean_xr.values.flatten()
 
-                # Se i dati sono in frazione (0-1), convertiamo in percentuale (0-100)
-                if np.nanmax(mean_vals) <= 1.0:
-                    mean_vals = mean_vals * 100.0
+                # Conversione 0-1 a 0-100% se necessario
+                if np.nanmax(mean_vals) <= 1.0: mean_vals = mean_vals * 100.0
 
-                fig = plt.figure(figsize=(10, 8))
-                ax = plt.axes(projection=ccrs.Mercator())
-                ax.set_extent(domain, crs=ccrs.PlateCarree())
+                mask_nw = (lat_vals >= 43.5) & (lat_vals <= 46.8) & (lon_vals >= 6.0) & (lon_vals <= 10.5)
+                lat_crop, lon_crop, mean_crop = lat_vals[mask_nw], lon_vals[mask_nw], np.nan_to_num(mean_vals[mask_nw], nan=0.0)
 
+                fig = plt.figure(figsize=(10, 8)); ax = plt.axes(projection=ccrs.Mercator()); ax.set_extent(domain, crs=ccrs.PlateCarree())
                 ax.add_feature(regions_feature)
                 if prov_feature: ax.add_feature(prov_feature)
-                else: 
-                    ax.coastlines(resolution='10m')
-                    ax.add_feature(cfeature.BORDERS)
+                else: ax.coastlines(resolution='10m'); ax.add_feature(cfeature.BORDERS)
 
-                cmap = ListedColormap(my_colors)
-                norm = BoundaryNorm(my_levels, cmap.N)
+                cmap, norm = ListedColormap(my_colors), BoundaryNorm(my_levels, len(my_colors))
 
-                mask = mean_vals >= 10
-
-                if np.any(mask):
-                    sc = ax.scatter(lon_vals[mask], lat_vals[mask], 
-                                    c=mean_vals[mask], cmap=cmap, norm=norm,
-                                    s=4, marker='s', transform=ccrs.PlateCarree(),
-                                    edgecolors='none')
-                    
-                    cbar = plt.colorbar(sc, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
-                    cbar.set_label("Nuvolosità Bassa Media (%)", fontweight='bold')
+                if np.nanmax(mean_crop) >= my_levels[1]: # Partiamo da my_levels[1] (10)
+                    cf = ax.tricontourf(lon_crop, lat_crop, mean_crop, levels=my_levels, cmap=cmap, norm=norm, transform=ccrs.PlateCarree(), extend='max', alpha=1.0)
+                    cbar = plt.colorbar(cf, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05); cbar.set_label("Nuvolosità Bassa Media (%)", fontweight='bold')
+                else:
+                    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm); sm.set_array([]) 
+                    cbar = plt.colorbar(sm, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05); cbar.set_label("Nuvolosità Bassa Media (%)", fontweight='bold')
 
                 ax.plot(7.51, 45.07, marker='o', color='brown', markersize=6, transform=ccrs.PlateCarree())
                 for lo, la, sig in zip(lons, lats, sigle):
@@ -276,45 +146,18 @@ def genera_album_clcl(dt_run_utc: datetime, nome_run: str):
                     ax.text(lo + 0.05, la + 0.05, sig, color='black', fontsize=9, fontweight='bold', transform=ccrs.PlateCarree())
 
                 dt_target_local = (dt_run_utc + timedelta(hours=h)).astimezone(rome_tz)
-                str_valida = f"Ore {dt_target_local.strftime('%H:%M del %d/%m/%Y')} (+{h}h)"
-
-                title = f"ICON-D2 EPS - Nuvolosità Bassa Media (%)\nRun: {dt_run_utc.strftime('%d/%m/%Y %H:%M UTC')} | Validità: {str_valida}"
-                plt.title(title, fontweight='bold')
-
+                plt.title(f"ICON-D2 EPS - Nuvolosità Bassa Media (%)\nRun: {dt_run_utc.strftime('%d/%m/%Y %H:%M UTC')} | Validità: Ore {dt_target_local.strftime('%H:%M del %d/%m/%Y')} (+{h}h)", fontweight='bold')
                 filename = f"clcl_{h}.png"
-                plt.savefig(filename, dpi=200, bbox_inches='tight')
-                plt.close(fig)
-                percorsi_foto.append(filename)
-
-            except Exception as e:
-                print(f"  ❌ Errore elaborando l'ora {h}: {e}")
-                continue
+                plt.savefig(filename, dpi=200, bbox_inches='tight'); plt.close(fig); percorsi_foto.append(filename)
+            except Exception as e: print(f"  ❌ Errore ora {h}: {e}")
 
         if percorsi_foto:
-            caption_album = f"ICON-D2 EPS: Nuvolosità Bassa Media (%)\n{block_name}\nRun {nome_run}"
-            invia_album_telegram(percorsi_foto, caption_album)
-            
+            invia_album_telegram(percorsi_foto, f"ICON-D2 EPS: Nuvolosità Bassa Media (%)\n{block_name}\nRun {nome_run}")
             for f in percorsi_foto:
                 if os.path.exists(f): os.remove(f)
-                
-        time.sleep(10)
-
-def main():
-    print("Cerco l'ultimo run completo ICON-D2 EPS tramite la sentinella Open-Meteo...")
-    data = fetch_dati_con_retry()
-    
-    if not data: sys.exit(0)
-        
-    hourly = data.get("hourly", {})
-    utc_offset = data.get("utc_offset_seconds", 0)
-    
-    is_new, nome_run, dt_run_utc = estrai_limiti_run(hourly, "temperature_2m", utc_offset)
-
-    if is_new:
-        print(f"🚀 Lancio generazione Nuvolosità Bassa ICON-D2 per il RUN {nome_run} ({dt_run_utc.strftime('%Y-%m-%d %H:%M')})")
-        genera_album_clcl(dt_run_utc, nome_run)
-    else:
-        print("Nessun nuovo run trovato o run in fase di caricamento. Uscita.")
 
 if __name__ == "__main__":
-    main()
+    data = fetch_dati_con_retry()
+    if data:
+        is_new, nome_run, dt_run_utc = estrai_limiti_run(data.get("hourly", {}), "temperature_2m", data.get("utc_offset_seconds", 0))
+        if is_new: genera_album_clcl(dt_run_utc, nome_run)
