@@ -28,7 +28,6 @@ config.set("cache-policy", "temporary")
 LATITUDE = 45.07
 LONGITUDE = 7.54
 
-# File di controllo dedicato alla media oraria per evitare sovrapposizioni con altri script
 FILE_LAST_HOUR = "ultima_ora_icond2_mean.txt" 
 RUN_DURATION = 48 
 START_DELAY = 0
@@ -112,8 +111,8 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
     date_hour = dt_run_utc.strftime('%Y%m%d%H')
     step_str = f"{h_step:03d}"
     
-    url_gsp = f"https://opendata.dwd.de/weather/nwp/icon-d2-eps/grib/{run_hour}/rain_gsp/icon-d2-eps_germany_icosahedral_single-level_{date_hour}_{step_str}_2d_rain_gsp.grib2.bz2"
-    url_con = f"https://opendata.dwd.de/weather/nwp/icon-d2-eps/grib/{run_hour}/rain_con/icon-d2-eps_germany_icosahedral_single-level_{date_hour}_{step_str}_2d_rain_con.grib2.bz2"
+    # URL aggiornato per puntare unicamente a tot_prec
+    url_tot = f"https://opendata.dwd.de/weather/nwp/icon-d2-eps/grib/{run_hour}/tot_prec/icon-d2-eps_germany_icosahedral_single-level_{date_hour}_{step_str}_2d_tot_prec.grib2.bz2"
 
     def _download_one(url: str):
         for tentativo in range(max_retries):
@@ -130,19 +129,13 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
                 if tentativo == max_retries - 1: raise e
                 time.sleep(5 * (tentativo + 1))
 
-    p_gsp = _download_one(url_gsp)
-    p_con = _download_one(url_con)
+    p_tot = _download_one(url_tot)
+    ds_tot = earthkit.data.from_source("file", p_tot).to_xarray()
 
-    ds_gsp = earthkit.data.from_source("file", p_gsp).to_xarray()
-    ds_con = earthkit.data.from_source("file", p_con).to_xarray()
+    if 'member' in ds_tot.dims: ds_tot = ds_tot.rename({'member': 'eps'})
+    elif 'number' in ds_tot.dims: ds_tot = ds_tot.rename({'number': 'eps'})
 
-    if 'member' in ds_gsp.dims: ds_gsp = ds_gsp.rename({'member': 'eps'})
-    elif 'number' in ds_gsp.dims: ds_gsp = ds_gsp.rename({'number': 'eps'})
-    
-    if 'member' in ds_con.dims: ds_con = ds_con.rename({'member': 'eps'})
-    elif 'number' in ds_con.dims: ds_con = ds_con.rename({'number': 'eps'})
-
-    # --- MODIFICA 1: IL TAGLIO IMMEDIATO ---
+    # Taglio immediato della griglia
     def applica_taglio_nw(ds):
         dim_nodi = 'ncells' if 'ncells' in ds.dims else list(ds.dims)[-1]
         lats = ds['latitude'].values
@@ -150,20 +143,13 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
         mask_nw = (lats >= 43.5) & (lats <= 46.8) & (lons >= 6.0) & (lons <= 10.5)
         return ds.isel({dim_nodi: mask_nw})
         
-    ds_gsp = applica_taglio_nw(ds_gsp)
-    ds_con = applica_taglio_nw(ds_con)
-    # ---------------------------------------
+    ds_tot = applica_taglio_nw(ds_tot)
 
-    gsp_var = list(ds_gsp.data_vars)[0]
-    con_var = list(ds_con.data_vars)[0]
-    
-    tot_prec = (ds_gsp[gsp_var] + ds_con[con_var]).compute()
+    tot_var = list(ds_tot.data_vars)[0]
+    tot_prec = ds_tot[tot_var].compute()
 
-    ds_gsp.close()
-    ds_con.close()
-    try: os.remove(p_gsp) 
-    except: pass
-    try: os.remove(p_con) 
+    ds_tot.close()
+    try: os.remove(p_tot) 
     except: pass
 
     return tot_prec
@@ -278,17 +264,22 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                         prec_h_minus_1 = prev_tot
                     else:
                         prec_h_minus_1 = scarica_step_precipitazione(dt_run_utc, h - 1)
-                    prec_oraria = curr_tot - prec_h_minus_1
+                    
+                    # FIX MAPPE BIANCHE: aggiriamo il rigido allineamento xarray operando i calcoli 
+                    # direttamente via numpy e rimpiazzando eventuali negativi con zero.
+                    sottrazione_sicura = np.maximum(0, curr_tot.values - prec_h_minus_1.values)
+                    prec_oraria = curr_tot.copy(data=sottrazione_sicura)
 
                 prev_tot = curr_tot
                 prev_step_idx = h
 
                 prec_mean_xr = prec_oraria.mean(dim="eps")
                 
-                # I dati sono GIA' tagliati a 15k punti, estraiamo semplicemente
                 lat_vals = prec_mean_xr['latitude'].values
                 lon_vals = prec_mean_xr['longitude'].values
-                mean_vals = prec_mean_xr.values
+                
+                # Protezione extra da corruzioni e NaN che sballano il limite massimo
+                mean_vals = np.nan_to_num(prec_mean_xr.values, nan=0.0)
 
                 fig = plt.figure(figsize=(10, 8))
                 ax = plt.axes(projection=ccrs.Mercator())
@@ -303,8 +294,8 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 cmap = ListedColormap(my_colors)
                 norm = BoundaryNorm(my_levels, cmap.N)
 
-                # --- MODIFICA 2: TRICONTOURF (MACCHIE VELOCI) ---
-                if np.max(mean_vals) >= my_levels[0]:
+                # Ora np.nanmax gestirà in modo pulito l'assenza di dati
+                if np.nanmax(mean_vals) >= my_levels[0]:
                     cf = ax.tricontourf(lon_vals, lat_vals, mean_vals, 
                                         levels=my_levels, cmap=cmap, norm=norm,
                                         transform=ccrs.PlateCarree(), extend='max', alpha=1.0)
@@ -316,7 +307,6 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                     sm.set_array([]) 
                     cbar = plt.colorbar(sm, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
                     cbar.set_label("Precipitazione Oraria Media (mm/h)", fontweight='bold')
-                # ------------------------------------------------
 
                 ax.plot(7.51, 45.07, marker='o', color='brown', markersize=6, transform=ccrs.PlateCarree())
                 for lo, la, sig in zip(lons, lats, sigle):
