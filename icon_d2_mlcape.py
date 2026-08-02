@@ -187,23 +187,16 @@ def invia_album_telegram(file_paths: list, caption: str):
 
 def raggruppa_in_blocchi(dt_run_local: datetime) -> dict:
     blocchi = {}
-    for h in range(1, 49): 
-        dt_target = dt_run_local + timedelta(hours=h)
-        date_str = dt_target.date().strftime("%Y-%m-%d")
-        hour = dt_target.hour
-
-        if hour == 0:
-            date_str = (dt_target.date() - timedelta(days=1)).strftime("%Y-%m-%d")
-            b_name = "18-24"
-        elif 1 <= hour <= 6: b_name = "00-06"
-        elif 7 <= hour <= 12: b_name = "06-12"
-        elif 13 <= hour <= 18: b_name = "12-18"
-        else: b_name = "18-24"
-
-        key = f"{date_str} (Fascia {b_name})"
+    for h_start in range(1, 49, 3): 
+        h_end = min(h_start + 2, 48)
+        
+        dt_target = dt_run_local + timedelta(hours=h_start)
+        date_str = dt_target.strftime("%d-%m-%Y")
+        
+        key = f"Giornata del {date_str}"
         if key not in blocchi:
             blocchi[key] = []
-        blocchi[key].append(h)
+        blocchi[key].append(range(h_start, h_end + 1))
     return blocchi
 
 
@@ -228,19 +221,27 @@ def genera_album_mlcape(dt_run_utc: datetime, nome_run: str):
     lons = [7.68,  7.55,  8.20,  8.61,  8.42,  8.61,  8.05,  8.55]
     sigle = ["TO", "CN", "AT", "AL", "VC", "NO", "BI", "VB"]
 
-    for block_name, ore_list in blocchi.items():
+    for block_name, windows in blocchi.items():
         print(f"\nGenerazione album MLCAPE medio: {block_name}")
         percorsi_foto = []
 
-        for h in ore_list:
+        for w in windows:
+            h_start = w[0]
+            h_end = w[-1]
             try:
-                print(f"  ⬇️  Elaborazione MLCAPE H={h}...")
-                curr_cape = scarica_step_mlcape(dt_run_utc, h)
-                cape_mean_xr = curr_cape.mean(dim="eps")
+                print(f"  ⬇️  Elaborazione MLCAPE H={h_start}-{h_end}...")
+                
+                datasets = []
+                for hr in w:
+                    datasets.append(scarica_step_mlcape(dt_run_utc, hr))
+                
+                combined = xr.concat(datasets, dim="time")
+                max_3h_xr = combined.max(dim="time")
+                mean_xr = max_3h_xr.mean(dim="eps")
 
-                lat_vals = cape_mean_xr['latitude'].values
-                lon_vals = cape_mean_xr['longitude'].values
-                mean_vals = cape_mean_xr.values
+                lat_vals = mean_xr['latitude'].values
+                lon_vals = mean_xr['longitude'].values
+                mean_vals = mean_xr.values
 
                 fig = plt.figure(figsize=(10, 8))
                 ax = plt.axes(projection=ccrs.Mercator())
@@ -271,23 +272,24 @@ def genera_album_mlcape(dt_run_utc: datetime, nome_run: str):
                     ax.plot(lo, la, marker='o', color='black', markersize=3, transform=ccrs.PlateCarree())
                     ax.text(lo + 0.05, la + 0.05, sig, color='black', fontsize=9, fontweight='bold', transform=ccrs.PlateCarree())
 
-                dt_target_local = (dt_run_utc + timedelta(hours=h)).astimezone(rome_tz)
-                str_valida = f"Ore {dt_target_local.strftime('%H:%M del %d/%m/%Y')} (+{h}h)"
+                start_local = dt_run_local + timedelta(hours=h_start-1)
+                end_local = dt_run_local + timedelta(hours=h_end)
+                str_valida = f"{start_local.strftime('%H:%M')} - {end_local.strftime('%H:%M del %d/%m')} (+{h_start}-{h_end}h)"
 
-                title = f"ICON-D2 EPS - MLCAPE Medio (J/kg)\nRun: {dt_run_utc.strftime('%d/%m/%Y %H:%M UTC')} | Validità: {str_valida}"
+                title = f"ICON-D2 EPS - MLCAPE Medio (J/kg) [Max 3h]\nRun: {dt_run_utc.strftime('%d/%m/%Y %H:%M UTC')} | {str_valida}"
                 plt.title(title, fontweight='bold')
 
-                filename = f"mlcape_{h}.png"
+                filename = f"mlcape_{h_start}_{h_end}.png"
                 plt.savefig(filename, dpi=200, bbox_inches='tight')
                 plt.close(fig)
                 percorsi_foto.append(filename)
 
             except Exception as e:
-                print(f"  ❌ Errore elaborando l'ora {h}: {e}")
+                print(f"  ❌ Errore elaborando ore {h_start}-{h_end}: {e}")
                 continue
 
         if percorsi_foto:
-            caption_album = f"ICON-D2 EPS: MLCAPE Medio (J/kg)\n{block_name}\nRun {nome_run}"
+            caption_album = f"ICON-D2 EPS: MLCAPE Medio (J/kg) [Max 3h]\n{block_name}\nRun {nome_run}"
             invia_album_telegram(percorsi_foto, caption_album)
             
             for f in percorsi_foto:
