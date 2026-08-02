@@ -111,7 +111,6 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
     date_hour = dt_run_utc.strftime('%Y%m%d%H')
     step_str = f"{h_step:03d}"
     
-    # URL aggiornato per puntare unicamente a tot_prec
     url_tot = f"https://opendata.dwd.de/weather/nwp/icon-d2-eps/grib/{run_hour}/tot_prec/icon-d2-eps_germany_icosahedral_single-level_{date_hour}_{step_str}_2d_tot_prec.grib2.bz2"
 
     def _download_one(url: str):
@@ -132,27 +131,33 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
     p_tot = _download_one(url_tot)
     ds_tot = earthkit.data.from_source("file", p_tot).to_xarray()
 
-    if 'member' in ds_tot.dims: ds_tot = ds_tot.rename({'member': 'eps'})
-    elif 'number' in ds_tot.dims: ds_tot = ds_tot.rename({'number': 'eps'})
-
-    # Taglio immediato della griglia
-    def applica_taglio_nw(ds):
-        dim_nodi = 'ncells' if 'ncells' in ds.dims else list(ds.dims)[-1]
-        lats = ds['latitude'].values
-        lons = ds['longitude'].values
-        mask_nw = (lats >= 43.5) & (lats <= 46.8) & (lons >= 6.0) & (lons <= 10.5)
-        return ds.isel({dim_nodi: mask_nw})
-        
-    ds_tot = applica_taglio_nw(ds_tot)
-
     tot_var = list(ds_tot.data_vars)[0]
-    tot_prec = ds_tot[tot_var].compute()
+
+    # --- RISOLUZIONE DEFINITIVA DEL PROBLEMA LUNGHEZZE ---
+    # 1. Estraiamo Lats e Lons crudi eliminando ogni attributo xarray
+    lats = ds_tot['latitude'].values
+    lons = ds_tot['longitude'].values
+    if lats.ndim > 1: lats = lats.flatten()
+    if lons.ndim > 1: lons = lons.flatten()
+    
+    # 2. Creiamo una maschera booleana pura per il Nord Ovest
+    mask_nw = (lats >= 43.5) & (lats <= 46.8) & (lons >= 6.0) & (lons <= 10.5)
+    
+    # 3. Estraiamo il dato della precipitazione crudo (solitamente shape [eps, nodi])
+    data_raw = ds_tot[tot_var].values
+    
+    # 4. Applichiamo la maschera sia sulle coordinate che sui dati. 
+    # L'ellissi "..." indica a numpy di tagliare l'ultima dimensione (i nodi)
+    data_sliced = data_raw[..., mask_nw]
+    lat_sliced = lats[mask_nw]
+    lon_sliced = lons[mask_nw]
 
     ds_tot.close()
     try: os.remove(p_tot) 
     except: pass
 
-    return tot_prec
+    # Restituiamo 3 array NumPy perfettamente allineati
+    return data_sliced, lat_sliced, lon_sliced
 
 
 def invia_album_telegram(file_paths: list, caption: str):
@@ -241,8 +246,8 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
     if os.path.exists(shp_path):
         prov_feature = cfeature.ShapelyFeature(shpreader.Reader(shp_path).geometries(), ccrs.PlateCarree(), edgecolor='black', facecolor='none', linewidth=0.5, linestyle=':')
 
-    lats = [45.07, 44.38, 44.90, 44.91, 45.32, 45.45, 45.56, 45.92]
-    lons = [7.68,  7.55,  8.20,  8.61,  8.42,  8.61,  8.05,  8.55]
+    lats_cities = [45.07, 44.38, 44.90, 44.91, 45.32, 45.45, 45.56, 45.92]
+    lons_cities = [7.68,  7.55,  8.20,  8.61,  8.42,  8.61,  8.05,  8.55]
     sigle = ["TO", "CN", "AT", "AL", "VC", "NO", "BI", "VB"]
 
     for block_name, ore_list in blocchi.items():
@@ -255,7 +260,7 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
         for h in ore_list:
             try:
                 print(f"  ⬇️  Elaborazione accumulo orario H={h}...")
-                curr_tot = scarica_step_precipitazione(dt_run_utc, h)
+                curr_tot, lat_vals, lon_vals = scarica_step_precipitazione(dt_run_utc, h)
 
                 if h == 1:
                     prec_oraria = curr_tot
@@ -263,23 +268,22 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                     if prev_step_idx == h - 1 and prev_tot is not None:
                         prec_h_minus_1 = prev_tot
                     else:
-                        prec_h_minus_1 = scarica_step_precipitazione(dt_run_utc, h - 1)
+                        prec_h_minus_1, _, _ = scarica_step_precipitazione(dt_run_utc, h - 1)
                     
-                    # FIX MAPPE BIANCHE: aggiriamo il rigido allineamento xarray operando i calcoli 
-                    # direttamente via numpy e rimpiazzando eventuali negativi con zero.
-                    sottrazione_sicura = np.maximum(0, curr_tot.values - prec_h_minus_1.values)
-                    prec_oraria = curr_tot.copy(data=sottrazione_sicura)
+                    # Sottrazione cruda e ultraveloce tra array NumPy identici
+                    prec_oraria = np.maximum(0, curr_tot - prec_h_minus_1)
 
                 prev_tot = curr_tot
                 prev_step_idx = h
 
-                prec_mean_xr = prec_oraria.mean(dim="eps")
+                # Calcolo media matematica con numpy (schiacciamo l'asse degli ensemble '0')
+                if prec_oraria.ndim > 1:
+                    mean_vals = prec_oraria.mean(axis=0)
+                else:
+                    mean_vals = prec_oraria
                 
-                lat_vals = prec_mean_xr['latitude'].values
-                lon_vals = prec_mean_xr['longitude'].values
-                
-                # Protezione extra da corruzioni e NaN che sballano il limite massimo
-                mean_vals = np.nan_to_num(prec_mean_xr.values, nan=0.0)
+                # Sostituiamo ogni nan con 0.0 per rendere felice tricontourf
+                mean_vals = np.nan_to_num(mean_vals, nan=0.0)
 
                 fig = plt.figure(figsize=(10, 8))
                 ax = plt.axes(projection=ccrs.Mercator())
@@ -294,7 +298,6 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 cmap = ListedColormap(my_colors)
                 norm = BoundaryNorm(my_levels, cmap.N)
 
-                # Ora np.nanmax gestirà in modo pulito l'assenza di dati
                 if np.nanmax(mean_vals) >= my_levels[0]:
                     cf = ax.tricontourf(lon_vals, lat_vals, mean_vals, 
                                         levels=my_levels, cmap=cmap, norm=norm,
@@ -309,7 +312,7 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                     cbar.set_label("Precipitazione Oraria Media (mm/h)", fontweight='bold')
 
                 ax.plot(7.51, 45.07, marker='o', color='brown', markersize=6, transform=ccrs.PlateCarree())
-                for lo, la, sig in zip(lons, lats, sigle):
+                for lo, la, sig in zip(lons_cities, lats_cities, sigle):
                     ax.plot(lo, la, marker='o', color='black', markersize=3, transform=ccrs.PlateCarree())
                     ax.text(lo + 0.05, la + 0.05, sig, color='black', fontsize=9, fontweight='bold', transform=ccrs.PlateCarree())
 
