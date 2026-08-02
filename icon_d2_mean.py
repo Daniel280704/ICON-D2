@@ -111,8 +111,9 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
     date_hour = dt_run_utc.strftime('%Y%m%d%H')
     step_str = f"{h_step:03d}"
     
-    # Singolo URL unificato per velocizzare il server
-    url_tot = f"https://opendata.dwd.de/weather/nwp/icon-d2-eps/grib/{run_hour}/tot_prec/icon-d2-eps_germany_icosahedral_single-level_{date_hour}_{step_str}_2d_tot_prec.grib2.bz2"
+    # Torniamo a rain_gsp e rain_con come nella vecchia versione stabile
+    url_gsp = f"https://opendata.dwd.de/weather/nwp/icon-d2-eps/grib/{run_hour}/rain_gsp/icon-d2-eps_germany_icosahedral_single-level_{date_hour}_{step_str}_2d_rain_gsp.grib2.bz2"
+    url_con = f"https://opendata.dwd.de/weather/nwp/icon-d2-eps/grib/{run_hour}/rain_con/icon-d2-eps_germany_icosahedral_single-level_{date_hour}_{step_str}_2d_rain_con.grib2.bz2"
 
     def _download_one(url: str):
         for tentativo in range(max_retries):
@@ -129,19 +130,28 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
                 if tentativo == max_retries - 1: raise e
                 time.sleep(5 * (tentativo + 1))
 
-    p_tot = _download_one(url_tot)
-    ds_tot = earthkit.data.from_source("file", p_tot).to_xarray()
+    p_gsp = _download_one(url_gsp)
+    p_con = _download_one(url_con)
 
-    if 'member' in ds_tot.dims: ds_tot = ds_tot.rename({'member': 'eps'})
-    elif 'number' in ds_tot.dims: ds_tot = ds_tot.rename({'number': 'eps'})
+    ds_gsp = earthkit.data.from_source("file", p_gsp).to_xarray()
+    ds_con = earthkit.data.from_source("file", p_con).to_xarray()
 
-    tot_var = list(ds_tot.data_vars)[0]
+    if 'member' in ds_gsp.dims: ds_gsp = ds_gsp.rename({'member': 'eps'})
+    elif 'number' in ds_gsp.dims: ds_gsp = ds_gsp.rename({'number': 'eps'})
     
-    # Restituisce l'oggetto Xarray integro, come nella versione vecchia affidabile
-    tot_prec = ds_tot[tot_var].compute()
+    if 'member' in ds_con.dims: ds_con = ds_con.rename({'member': 'eps'})
+    elif 'number' in ds_con.dims: ds_con = ds_con.rename({'number': 'eps'})
 
-    ds_tot.close()
-    try: os.remove(p_tot) 
+    gsp_var = list(ds_gsp.data_vars)[0]
+    con_var = list(ds_con.data_vars)[0]
+    
+    tot_prec = (ds_gsp[gsp_var] + ds_con[con_var]).compute()
+
+    ds_gsp.close()
+    ds_con.close()
+    try: os.remove(p_gsp) 
+    except: pass
+    try: os.remove(p_con) 
     except: pass
 
     return tot_prec
@@ -257,29 +267,34 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                     else:
                         prec_h_minus_1 = scarica_step_precipitazione(dt_run_utc, h - 1)
                     
-                    # Sottrazione rapida in NumPy mantenendo l'involucro Xarray intatto
+                    # Sottrazione sicura in NumPy
                     prec_oraria = curr_tot.copy(data=np.maximum(0, curr_tot.values - prec_h_minus_1.values))
 
                 prev_tot = curr_tot
                 prev_step_idx = h
 
-                # Media effettuata in totale sicurezza da Xarray
-                if 'eps' in prec_oraria.dims:
-                    prec_mean_xr = prec_oraria.mean(dim="eps")
+                # --- LO SCHIACCIASASSI DIMENSIONALE ---
+                # Identifichiamo il nome della dimensione della griglia (solitamente l'ultima o 'ncells')
+                dim_nodi = 'ncells' if 'ncells' in prec_oraria.dims else list(prec_oraria.dims)[-1]
+                
+                # Raccogliamo TUTTE le dimensioni extra che non c'entrano con la griglia
+                dims_to_mean = [d for d in prec_oraria.dims if d != dim_nodi]
+                
+                # Facciamo la media forzata su tutto per garantire un array 1D
+                if dims_to_mean:
+                    prec_mean_xr = prec_oraria.mean(dim=dims_to_mean)
                 else:
                     prec_mean_xr = prec_oraria
-                
-                # LA SOLUZIONE ALL'ERRORE: flatten() assicura che gli array siano monodimensionali e della stessa esatta lunghezza
+
                 lat_vals = prec_mean_xr['latitude'].values.flatten()
                 lon_vals = prec_mean_xr['longitude'].values.flatten()
                 mean_vals = prec_mean_xr.values.flatten()
 
-                # Taglio geografico: abbatte il 95% del calcolo di Cartopy per salvare la CPU
+                # Ora lat, lon e mask avranno sempre la stessa identica lunghezza garantita (542.040)
                 mask = (lat_vals >= 43.5) & (lat_vals <= 46.8) & (lon_vals >= 6.0) & (lon_vals <= 10.5)
                 
                 lat_crop = lat_vals[mask]
                 lon_crop = lon_vals[mask]
-                # Pulizia dai NaN e applicazione della maschera
                 mean_crop = np.nan_to_num(mean_vals[mask], nan=0.0)
 
                 fig = plt.figure(figsize=(10, 8))
@@ -296,7 +311,6 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 norm = BoundaryNorm(my_levels, cmap.N)
 
                 if np.nanmax(mean_crop) >= my_levels[0]:
-                    # Disegno ultraveloce a macchie solo sui 15k punti estratti
                     cf = ax.tricontourf(lon_crop, lat_crop, mean_crop, 
                                         levels=my_levels, cmap=cmap, norm=norm,
                                         transform=ccrs.PlateCarree(), extend='max', alpha=1.0)
