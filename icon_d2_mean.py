@@ -142,6 +142,18 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
     if 'member' in ds_con.dims: ds_con = ds_con.rename({'member': 'eps'})
     elif 'number' in ds_con.dims: ds_con = ds_con.rename({'number': 'eps'})
 
+    # --- MODIFICA 1: IL TAGLIO IMMEDIATO ---
+    def applica_taglio_nw(ds):
+        dim_nodi = 'ncells' if 'ncells' in ds.dims else list(ds.dims)[-1]
+        lats = ds['latitude'].values
+        lons = ds['longitude'].values
+        mask_nw = (lats >= 43.5) & (lats <= 46.8) & (lons >= 6.0) & (lons <= 10.5)
+        return ds.isel({dim_nodi: mask_nw})
+        
+    ds_gsp = applica_taglio_nw(ds_gsp)
+    ds_con = applica_taglio_nw(ds_con)
+    # ---------------------------------------
+
     gsp_var = list(ds_gsp.data_vars)[0]
     con_var = list(ds_con.data_vars)[0]
     
@@ -273,18 +285,10 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
 
                 prec_mean_xr = prec_oraria.mean(dim="eps")
                 
+                # I dati sono GIA' tagliati a 15k punti, estraiamo semplicemente
                 lat_vals = prec_mean_xr['latitude'].values
                 lon_vals = prec_mean_xr['longitude'].values
                 mean_vals = prec_mean_xr.values
-
-                # Aggiungiamo un margine per il crop
-                margin = 0.1
-                domain_mask = (lon_vals >= xmin - margin) & (lon_vals <= xmax + margin) & \
-                              (lat_vals >= ymin - margin) & (lat_vals <= ymax + margin)
-                
-                lon_crop = lon_vals[domain_mask]
-                lat_crop = lat_vals[domain_mask]
-                mean_crop = mean_vals[domain_mask]
 
                 fig = plt.figure(figsize=(10, 8))
                 ax = plt.axes(projection=ccrs.Mercator())
@@ -299,14 +303,20 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 cmap = ListedColormap(my_colors)
                 norm = BoundaryNorm(my_levels, cmap.N)
 
-                # --- MODIFICA: Sostituzione di ax.scatter con ax.tricontourf per l'effetto "macchie" ---
-                if np.max(mean_crop) >= 0.1:
-                    cf = ax.tricontourf(lon_crop, lat_crop, mean_crop, 
+                # --- MODIFICA 2: TRICONTOURF (MACCHIE VELOCI) ---
+                if np.max(mean_vals) >= my_levels[0]:
+                    cf = ax.tricontourf(lon_vals, lat_vals, mean_vals, 
                                         levels=my_levels, cmap=cmap, norm=norm,
-                                        transform=ccrs.PlateCarree(), alpha=1.0)
+                                        transform=ccrs.PlateCarree(), extend='max', alpha=1.0)
                     
                     cbar = plt.colorbar(cf, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
                     cbar.set_label("Precipitazione Oraria Media (mm/h)", fontweight='bold')
+                else:
+                    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+                    sm.set_array([]) 
+                    cbar = plt.colorbar(sm, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
+                    cbar.set_label("Precipitazione Oraria Media (mm/h)", fontweight='bold')
+                # ------------------------------------------------
 
                 ax.plot(7.51, 45.07, marker='o', color='brown', markersize=6, transform=ccrs.PlateCarree())
                 for lo, la, sig in zip(lons, lats, sigle):
