@@ -16,6 +16,7 @@ import warnings
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import cartopy.io.shapereader as shpreader
+import xarray as xr
 
 import earthkit.data
 from earthkit.data import config
@@ -27,7 +28,6 @@ config.set("cache-policy", "temporary")
 LATITUDE = 45.07
 LONGITUDE = 7.54
 
-# File di controllo per evitare sovrapposizioni
 FILE_LAST_HOUR = "ultima_ora_icond2_mean.txt" 
 RUN_DURATION = 48 
 START_DELAY = 0
@@ -111,7 +111,6 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
     date_hour = dt_run_utc.strftime('%Y%m%d%H')
     step_str = f"{h_step:03d}"
     
-    # URL mirato esclusivamente su tot_prec
     url_tot = f"https://opendata.dwd.de/weather/nwp/icon-d2-eps/grib/{run_hour}/tot_prec/icon-d2-eps_germany_icosahedral_single-level_{date_hour}_{step_str}_2d_tot_prec.grib2.bz2"
 
     def _download_one(url: str):
@@ -131,21 +130,32 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
 
     p_tot = _download_one(url_tot)
     ds_tot = earthkit.data.from_source("file", p_tot).to_xarray()
+
+    if 'member' in ds_tot.dims: ds_tot = ds_tot.rename({'member': 'eps'})
+    elif 'number' in ds_tot.dims: ds_tot = ds_tot.rename({'number': 'eps'})
+
     tot_var = list(ds_tot.data_vars)[0]
 
-    # --- TAGLIO A MONTE CON MASCHERA NUMPY ---
-    # Questo approccio garantisce array perfetti senza far esplodere la CPU
+    # SOLUZIONE DEFINITIVA: 
+    # Calcoliamo la media dell'Ensemble direttamente in Xarray!
+    if 'eps' in ds_tot.dims:
+        ds_tot = ds_tot.mean(dim='eps')
+        
+    # Spremitura per rimuovere assi spazzatura creati da earthkit (time, step)
+    ds_tot = ds_tot.squeeze()
+
     lats = ds_tot['latitude'].values
     lons = ds_tot['longitude'].values
     if lats.ndim > 1: lats = lats.flatten()
     if lons.ndim > 1: lons = lons.flatten()
     
-    # Creazione della maschera (Tutto il resto viene ignorato)
     mask_nw = (lats >= 43.5) & (lats <= 46.8) & (lons >= 6.0) & (lons <= 10.5)
     
-    # Estrazione dei dati e applicazione istantanea della maschera
     data_raw = ds_tot[tot_var].values
-    data_sliced = data_raw[..., mask_nw]
+    if data_raw.ndim > 1: data_raw = data_raw.flatten()
+    
+    # Ora il dato e le coordinate sono tutti puri array monodimensionali garantiti
+    data_sliced = data_raw[mask_nw]
     lat_sliced = lats[mask_nw]
     lon_sliced = lons[mask_nw]
 
@@ -153,14 +163,13 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
     try: os.remove(p_tot) 
     except: pass
 
-    # Ritorna 3 array NumPy perfettamente allineati e leggerissimi
     return data_sliced, lat_sliced, lon_sliced
 
 
 def invia_album_telegram(file_paths: list, caption: str):
     token = os.getenv("TELEGRAM_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    thread_id = os.getenv("TELEGRAM_THREAD_ID_2") # Thread per Medie Orarie
+    thread_id = os.getenv("TELEGRAM_THREAD_ID_2")
 
     if not token or not chat_id: return
 
@@ -257,6 +266,8 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
         for h in ore_list:
             try:
                 print(f"  ⬇️  Elaborazione accumulo orario H={h}...")
+                
+                # I dati restituiti sono ora array puramente monodimensionali!
                 curr_tot, lat_vals, lon_vals = scarica_step_precipitazione(dt_run_utc, h)
 
                 if h == 1:
@@ -267,20 +278,14 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                     else:
                         prec_h_minus_1, _, _ = scarica_step_precipitazione(dt_run_utc, h - 1)
                     
-                    # Sottrazione pura via NumPy con blocco dei negativi
+                    # Sottrazione semplice tra i due array mediati
                     prec_oraria = np.maximum(0, curr_tot - prec_h_minus_1)
 
                 prev_tot = curr_tot
                 prev_step_idx = h
 
-                # Media matematica pulita schiacciando l'asse degli ensemble
-                if prec_oraria.ndim > 1:
-                    mean_vals = prec_oraria.mean(axis=0)
-                else:
-                    mean_vals = prec_oraria
-                
-                # Rimozione dei NaN per la sicurezza di tricontourf
-                mean_vals = np.nan_to_num(mean_vals, nan=0.0)
+                # Sostituiamo ogni possibile NaN con 0.0 (Tricontourf lo richiede)
+                mean_vals = np.nan_to_num(prec_oraria, nan=0.0)
 
                 fig = plt.figure(figsize=(10, 8))
                 ax = plt.axes(projection=ccrs.Mercator())
