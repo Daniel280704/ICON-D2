@@ -106,15 +106,11 @@ def estrai_limiti_run(hourly_data: dict, ref_param: str, utc_offset_sec: int) ->
 
 
 def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
-    """
-    Scarica l'accumulo sulla GRIGLIA NATIVA ICOSAEDRALE corretta per l'Ensemble.
-    """
     run_hour_syn = dt_run_utc.hour          
     run_hour = f"{run_hour_syn:02d}"
     date_hour = dt_run_utc.strftime('%Y%m%d%H')
     step_str = f"{h_step:03d}"
     
-    # URL Ripristinato su "icosahedral" per i membri EPS
     url_gsp = f"https://opendata.dwd.de/weather/nwp/icon-d2-eps/grib/{run_hour}/rain_gsp/icon-d2-eps_germany_icosahedral_single-level_{date_hour}_{step_str}_2d_rain_gsp.grib2.bz2"
     url_con = f"https://opendata.dwd.de/weather/nwp/icon-d2-eps/grib/{run_hour}/rain_con/icon-d2-eps_germany_icosahedral_single-level_{date_hour}_{step_str}_2d_rain_con.grib2.bz2"
 
@@ -144,6 +140,18 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
     
     if 'member' in ds_con.dims: ds_con = ds_con.rename({'member': 'eps'})
     elif 'number' in ds_con.dims: ds_con = ds_con.rename({'number': 'eps'})
+
+    # --- MODIFICA 1: IL TAGLIO IMMEDIATO ---
+    def applica_taglio_nw(ds):
+        dim_nodi = 'ncells' if 'ncells' in ds.dims else list(ds.dims)[-1]
+        lats = ds['latitude'].values
+        lons = ds['longitude'].values
+        mask_nw = (lats >= 43.5) & (lats <= 46.8) & (lons >= 6.0) & (lons <= 10.5)
+        return ds.isel({dim_nodi: mask_nw})
+        
+    ds_gsp = applica_taglio_nw(ds_gsp)
+    ds_con = applica_taglio_nw(ds_con)
+    # ---------------------------------------
 
     gsp_var = list(ds_gsp.data_vars)[0]
     con_var = list(ds_con.data_vars)[0]
@@ -272,7 +280,7 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 # --- Calcolo Probabilità e Disegno Diretto ---
                 prob_xr = (prec_oraria >= 0.5).astype(float).mean(dim="eps") * 100
                 
-                # Estraiamo gli array monodimensionali esatti dell'icosaedro
+                # Anche qui la maschera è già fatta a monte da xarray
                 lat_vals = prob_xr['latitude'].values
                 lon_vals = prob_xr['longitude'].values
                 prob_vals = prob_xr.values
@@ -287,24 +295,24 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                     ax.coastlines(resolution='10m')
                     ax.add_feature(cfeature.BORDERS)
 
-                # Prepariamo la colormap in base ai tuoi livelli
                 cmap = ListedColormap(my_colors)
                 norm = BoundaryNorm(my_levels, cmap.N)
 
-                # Mascheriamo per alleggerire enormemente il rendering
-                mask = prob_vals >= 10
-                
-                if np.any(mask):
-                    # Lo scatter plot per 500k+ punti è la via più veloce e pulita
-                    sc = ax.scatter(lon_vals[mask], lat_vals[mask], 
-                                    c=prob_vals[mask], cmap=cmap, norm=norm,
-                                    s=4, marker='s', transform=ccrs.PlateCarree(),
-                                    edgecolors='none')
+                # --- MODIFICA 2: TRICONTOURF AL POSTO DI SCATTER ---
+                if np.max(prob_vals) >= my_levels[0]:
+                    tc = ax.tricontourf(lon_vals, lat_vals, prob_vals, 
+                                        levels=my_levels, cmap=cmap, norm=norm,
+                                        transform=ccrs.PlateCarree(), extend='max', alpha=1.0)
                     
-                    cbar = plt.colorbar(sc, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
+                    cbar = plt.colorbar(tc, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
                     cbar.set_label("Probabilità (%)", fontweight='bold')
+                else:
+                    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+                    sm.set_array([]) 
+                    cbar = plt.colorbar(sm, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05)
+                    cbar.set_label("Probabilità (%)", fontweight='bold')
+                # ---------------------------------------------------
 
-                # Aggiunta città
                 ax.plot(7.51, 45.07, marker='o', color='brown', markersize=6, transform=ccrs.PlateCarree())
                 for lo, la, sig in zip(lons, lats, sigle):
                     ax.plot(lo, la, marker='o', color='black', markersize=3, transform=ccrs.PlateCarree())
