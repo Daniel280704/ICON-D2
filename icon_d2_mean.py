@@ -111,8 +111,8 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
     date_hour = dt_run_utc.strftime('%Y%m%d%H')
     step_str = f"{h_step:03d}"
     
-    # URL mirato esclusivamente su tot_prec (1 solo download invece di 2!)
-    url_tot = f"https://opendata.dwd.de/weather/nwp/icon-d2-eps/grib/{run_hour}/tot_prec/icon-d2-eps_germany_icosahedral_single-level_{date_hour}_{step_str}_2d_tot_prec.grib2.bz2"
+    url_gsp = f"https://opendata.dwd.de/weather/nwp/icon-d2-eps/grib/{run_hour}/rain_gsp/icon-d2-eps_germany_icosahedral_single-level_{date_hour}_{step_str}_2d_rain_gsp.grib2.bz2"
+    url_con = f"https://opendata.dwd.de/weather/nwp/icon-d2-eps/grib/{run_hour}/rain_con/icon-d2-eps_germany_icosahedral_single-level_{date_hour}_{step_str}_2d_rain_con.grib2.bz2"
 
     def _download_one(url: str):
         for tentativo in range(max_retries):
@@ -129,39 +129,47 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
                 if tentativo == max_retries - 1: raise e
                 time.sleep(5 * (tentativo + 1))
 
-    p_tot = _download_one(url_tot)
-    ds_tot = earthkit.data.from_source("file", p_tot).to_xarray()
+    p_gsp = _download_one(url_gsp)
+    p_con = _download_one(url_con)
 
-    if 'member' in ds_tot.dims: ds_tot = ds_tot.rename({'member': 'eps'})
-    elif 'number' in ds_tot.dims: ds_tot = ds_tot.rename({'number': 'eps'})
+    ds_gsp = earthkit.data.from_source("file", p_gsp).to_xarray()
+    ds_con = earthkit.data.from_source("file", p_con).to_xarray()
 
-    tot_var = list(ds_tot.data_vars)[0]
+    gsp_var = list(ds_gsp.data_vars)[0]
+    con_var = list(ds_con.data_vars)[0]
 
-    # --- IL TAGLIO IMMEDIATO A MONTE ---
-    # 1. Estraiamo Lats e Lons come array puri 1D
-    lats = ds_tot['latitude'].values.flatten()
-    lons = ds_tot['longitude'].values.flatten()
+    # --- IL TAGLIO IMMEDIATO A MONTE (Salva CPU e RAM all'80/90%) ---
+    # 1. Estraiamo Lats e Lons come array puri 1D, rimuovendo ogni traccia di Xarray
+    lats = ds_gsp['latitude'].values.flatten()
+    lons = ds_gsp['longitude'].values.flatten()
     
-    # 2. Creiamo la maschera geografica
+    # 2. Creiamo la maschera geografica (lunga esattamente 542.040 punti)
     mask_nw = (lats >= 43.5) & (lats <= 46.8) & (lons >= 6.0) & (lons <= 10.5)
     
-    # 3. Estraiamo i dati. squeeze() elimina le dimensioni extra (come il "time") 
-    # che mandavano in crash la maschera generando 2.168.160 punti.
-    val_tot = ds_tot[tot_var].values.squeeze()
+    # 3. Estraiamo i dati. squeeze() elimina le dimensioni morte (come step temporali extra).
+    val_gsp = ds_gsp[gsp_var].values.squeeze()
+    val_con = ds_con[con_var].values.squeeze()
     
-    # 4. Applica la maschera di taglio SOLO sull'ultima dimensione (i nodi geografici), 
-    # mantenendo intatto l'asse dei 20 membri Ensemble.
-    tot_prec = val_tot[..., mask_nw]
+    # 4. IL TRUCCO MAGICO [..., mask_nw]: Applica la maschera di taglio SOLO sull'ultima dimensione 
+    # (i nodi geografici), mantenendo intatto l'asse dei 20 membri Ensemble che viene prima.
+    val_gsp_cut = val_gsp[..., mask_nw]
+    val_con_cut = val_con[..., mask_nw]
     
-    # Tagliamo anche le coordinate
+    # 5. La somma avviene ORA, su un array microscopico di 15.000 nodi!
+    tot_prec = val_gsp_cut + val_con_cut
+    
+    # Tagliamo anche le coordinate in uscita per passaggi futuri
     lats_cut = lats[mask_nw]
     lons_cut = lons[mask_nw]
 
-    ds_tot.close()
-    try: os.remove(p_tot) 
+    ds_gsp.close()
+    ds_con.close()
+    try: os.remove(p_gsp) 
+    except: pass
+    try: os.remove(p_con) 
     except: pass
 
-    # Restituiamo i 3 array NumPy pronti all'uso
+    # Restituiamo 3 array NumPy che contengono SOLO il nord-ovest
     return tot_prec, lats_cut, lons_cut
 
 
