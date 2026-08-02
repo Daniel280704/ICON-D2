@@ -111,7 +111,6 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
     date_hour = dt_run_utc.strftime('%Y%m%d%H')
     step_str = f"{h_step:03d}"
     
-    # Torniamo a rain_gsp e rain_con come nella vecchia versione stabile
     url_gsp = f"https://opendata.dwd.de/weather/nwp/icon-d2-eps/grib/{run_hour}/rain_gsp/icon-d2-eps_germany_icosahedral_single-level_{date_hour}_{step_str}_2d_rain_gsp.grib2.bz2"
     url_con = f"https://opendata.dwd.de/weather/nwp/icon-d2-eps/grib/{run_hour}/rain_con/icon-d2-eps_germany_icosahedral_single-level_{date_hour}_{step_str}_2d_rain_con.grib2.bz2"
 
@@ -136,16 +135,32 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
     ds_gsp = earthkit.data.from_source("file", p_gsp).to_xarray()
     ds_con = earthkit.data.from_source("file", p_con).to_xarray()
 
-    if 'member' in ds_gsp.dims: ds_gsp = ds_gsp.rename({'member': 'eps'})
-    elif 'number' in ds_gsp.dims: ds_gsp = ds_gsp.rename({'number': 'eps'})
-    
-    if 'member' in ds_con.dims: ds_con = ds_con.rename({'member': 'eps'})
-    elif 'number' in ds_con.dims: ds_con = ds_con.rename({'number': 'eps'})
-
     gsp_var = list(ds_gsp.data_vars)[0]
     con_var = list(ds_con.data_vars)[0]
+
+    # --- IL TAGLIO IMMEDIATO A MONTE (Salva CPU e RAM all'80/90%) ---
+    # 1. Estraiamo Lats e Lons come array puri 1D, rimuovendo ogni traccia di Xarray
+    lats = ds_gsp['latitude'].values.flatten()
+    lons = ds_gsp['longitude'].values.flatten()
     
-    tot_prec = (ds_gsp[gsp_var] + ds_con[con_var]).compute()
+    # 2. Creiamo la maschera geografica (lunga esattamente 542.040 punti)
+    mask_nw = (lats >= 43.5) & (lats <= 46.8) & (lons >= 6.0) & (lons <= 10.5)
+    
+    # 3. Estraiamo i dati. squeeze() elimina le dimensioni morte (come step temporali extra).
+    val_gsp = ds_gsp[gsp_var].values.squeeze()
+    val_con = ds_con[con_var].values.squeeze()
+    
+    # 4. IL TRUCCO MAGICO [..., mask_nw]: Applica la maschera di taglio SOLO sull'ultima dimensione 
+    # (i nodi geografici), mantenendo intatto l'asse dei 20 membri Ensemble che viene prima.
+    val_gsp_cut = val_gsp[..., mask_nw]
+    val_con_cut = val_con[..., mask_nw]
+    
+    # 5. La somma avviene ORA, su un array microscopico di 15.000 nodi!
+    tot_prec = val_gsp_cut + val_con_cut
+    
+    # Tagliamo anche le coordinate in uscita per passaggi futuri
+    lats_cut = lats[mask_nw]
+    lons_cut = lons[mask_nw]
 
     ds_gsp.close()
     ds_con.close()
@@ -154,7 +169,8 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
     try: os.remove(p_con) 
     except: pass
 
-    return tot_prec
+    # Restituiamo 3 array NumPy che contengono SOLO il nord-ovest
+    return tot_prec, lats_cut, lons_cut
 
 
 def invia_album_telegram(file_paths: list, caption: str):
@@ -257,7 +273,7 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
         for h in ore_list:
             try:
                 print(f"  ⬇️  Elaborazione accumulo orario H={h}...")
-                curr_tot = scarica_step_precipitazione(dt_run_utc, h)
+                curr_tot, lat_vals, lon_vals = scarica_step_precipitazione(dt_run_utc, h)
 
                 if h == 1:
                     prec_oraria = curr_tot
@@ -265,37 +281,22 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                     if prev_step_idx == h - 1 and prev_tot is not None:
                         prec_h_minus_1 = prev_tot
                     else:
-                        prec_h_minus_1 = scarica_step_precipitazione(dt_run_utc, h - 1)
+                        prec_h_minus_1, _, _ = scarica_step_precipitazione(dt_run_utc, h - 1)
                     
-                    # Sottrazione sicura in NumPy
-                    prec_oraria = curr_tot.copy(data=np.maximum(0, curr_tot.values - prec_h_minus_1.values))
+                    # Sottrazione rapida in NumPy sugli array piccolissimi!
+                    prec_oraria = np.maximum(0, curr_tot - prec_h_minus_1)
 
                 prev_tot = curr_tot
                 prev_step_idx = h
 
-                # --- LO SCHIACCIASASSI DIMENSIONALE ---
-                # Identifichiamo il nome della dimensione della griglia (solitamente l'ultima o 'ncells')
-                dim_nodi = 'ncells' if 'ncells' in prec_oraria.dims else list(prec_oraria.dims)[-1]
-                
-                # Raccogliamo TUTTE le dimensioni extra che non c'entrano con la griglia
-                dims_to_mean = [d for d in prec_oraria.dims if d != dim_nodi]
-                
-                # Facciamo la media forzata su tutto per garantire un array 1D
-                if dims_to_mean:
-                    prec_mean_xr = prec_oraria.mean(dim=dims_to_mean)
+                # Media matematica schiacciando rigorosamente l'asse dei 20 membri EPS (che è l'asse 0)
+                if prec_oraria.ndim > 1:
+                    mean_vals = prec_oraria.mean(axis=0)
                 else:
-                    prec_mean_xr = prec_oraria
-
-                lat_vals = prec_mean_xr['latitude'].values.flatten()
-                lon_vals = prec_mean_xr['longitude'].values.flatten()
-                mean_vals = prec_mean_xr.values.flatten()
-
-                # Ora lat, lon e mask avranno sempre la stessa identica lunghezza garantita (542.040)
-                mask = (lat_vals >= 43.5) & (lat_vals <= 46.8) & (lon_vals >= 6.0) & (lon_vals <= 10.5)
+                    mean_vals = prec_oraria
                 
-                lat_crop = lat_vals[mask]
-                lon_crop = lon_vals[mask]
-                mean_crop = np.nan_to_num(mean_vals[mask], nan=0.0)
+                # Sostituiamo ogni nan con 0.0 per rendere felice tricontourf
+                mean_vals = np.nan_to_num(mean_vals, nan=0.0)
 
                 fig = plt.figure(figsize=(10, 8))
                 ax = plt.axes(projection=ccrs.Mercator())
@@ -310,8 +311,9 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 cmap = ListedColormap(my_colors)
                 norm = BoundaryNorm(my_levels, cmap.N)
 
-                if np.nanmax(mean_crop) >= my_levels[0]:
-                    cf = ax.tricontourf(lon_crop, lat_crop, mean_crop, 
+                # Ora lat_vals, lon_vals e mean_vals sono 3 array perfetti e velocissimi. Niente più check, solo rendering!
+                if np.max(mean_vals) >= my_levels[0]:
+                    cf = ax.tricontourf(lon_vals, lat_vals, mean_vals, 
                                         levels=my_levels, cmap=cmap, norm=norm,
                                         transform=ccrs.PlateCarree(), extend='max', alpha=1.0)
                     
