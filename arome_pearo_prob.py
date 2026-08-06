@@ -27,6 +27,7 @@ LATITUDE, LONGITUDE = 45.07, 7.51
 FILE_LAST_HOUR, RUN_DURATION, START_DELAY = "ultima_ora_arome_prob.txt", 48, 0
 
 def fetch_dati_con_retry() -> dict:
+    print("DEBUG: Interrogazione Open-Meteo per il controllo run...", flush=True)
     URL, params = "https://api.open-meteo.com/v1/forecast", {
         "latitude": LATITUDE, 
         "longitude": LONGITUDE, 
@@ -36,18 +37,23 @@ def fetch_dati_con_retry() -> dict:
         "past_days": 1, 
         "forecast_days": 3
     }
-    for _ in range(3):
+    for tentativo in range(3):
         try:
             r = requests.get(URL, params=params, headers={"User-Agent": "MeteoBot-AROME-Mappe/1.0"}, timeout=30)
             r.raise_for_status()
+            print("DEBUG: Dati Open-Meteo scaricati con successo.", flush=True)
             return r.json()
-        except: 
+        except Exception as e:
+            print(f"DEBUG: Tentativo {tentativo+1} fallito su Open-Meteo: {e}", flush=True)
             time.sleep(15)
     return {}
 
 def estrai_limiti_run(hourly_data: dict, ref_param: str, utc_offset_sec: int) -> tuple[bool, str, datetime]:
     times, mean_vals = hourly_data.get("time", []), hourly_data.get(ref_param, [])
-    if not times or not mean_vals: return False, "", None
+    if not times or not mean_vals: 
+        print("DEBUG: Dati orari vuoti o mancanti nella risposta.", flush=True)
+        return False, "", None
+        
     end_idx = next((i for i in range(len(mean_vals)-1, -1, -1) if mean_vals[i] is not None), -1)
     if end_idx == -1: return False, "", None
     
@@ -61,9 +67,15 @@ def estrai_limiti_run(hourly_data: dict, ref_param: str, utc_offset_sec: int) ->
     except ValueError: return False, "", None
     if (end_idx - start_idx + 1) < (RUN_DURATION - START_DELAY + 1): return False, "", None
     
+    print(f"DEBUG: Ultima ora valida trovata: {ultima_ora_valida_str} | Run calcolato: {nome_run}", flush=True)
+    
     if os.path.exists(FILE_LAST_HOUR):
         with open(FILE_LAST_HOUR, "r") as f:
-            if ultima_ora_valida_str <= f.read().strip(): return False, "", None
+            cached_val = f.read().strip()
+            print(f"DEBUG: Controllo cache -> Salvato: {cached_val} | Attuale: {ultima_ora_valida_str}", flush=True)
+            if ultima_ora_valida_str <= cached_val: 
+                print("DEBUG: Il run è già stato processato in precedenza (nessuna novità).", flush=True)
+                return False, "", None
             
     with open(FILE_LAST_HOUR, "w") as f: f.write(ultima_ora_valida_str)
     return True, nome_run, dt_run_utc_naive.replace(tzinfo=timezone.utc)
@@ -80,8 +92,6 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
     
     run_hour = f"{dt_run_utc.hour:02d}z"
     coverage_id = f"MF-NWP-HIGHRES-PEARO{run_hour}-0025-FRANCE-WCS"
-    
-    # Calcolo dell'orario esatto dello step previsionale sommando h_step al run UTC
     dt_target_step = dt_run_utc + timedelta(hours=h_step)
     
     params = {
@@ -176,7 +186,7 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
     lats, lons, sigle = [45.07, 44.38, 44.90, 44.91, 45.32, 45.45, 45.56, 45.92], [7.68, 7.55, 8.20, 8.61, 8.42, 8.61, 8.05, 8.55], ["TO", "CN", "AT", "AL", "VC", "NO", "BI", "VB"]
 
     for block_name, ore_list in blocchi.items():
-        print(f"\nGenerazione probabilità orarie PEARO: {block_name}")
+        print(f"\nGenerazione probabilità orarie PEARO: {block_name}", flush=True)
         percorsi_foto, prev_step_idx, prev_tot = [], -1, None
         
         for h in ore_list:
@@ -226,7 +236,7 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 percorsi_foto.append(filename)
                 
             except Exception as e:
-                print(f"  ⚠️ [SKIP] Errore ora {h} (geometria/dati): {e}")
+                print(f"  ⚠️ [SKIP] Errore ora {h} (geometria/dati): {e}", flush=True)
                 continue
 
         if percorsi_foto:
@@ -235,7 +245,13 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 if os.path.exists(f): os.remove(f)
 
 if __name__ == "__main__":
+    print("DEBUG: Avvio script PEARO...", flush=True)
     data = fetch_dati_con_retry()
     if data:
         is_new, nome_run, dt_run_utc = estrai_limiti_run(data.get("hourly", {}), "temperature_2m", data.get("utc_offset_seconds", 0))
-        if is_new: genera_album_orari(dt_run_utc, nome_run)
+        if is_new: 
+            genera_album_orari(dt_run_utc, nome_run)
+        else:
+            print("DEBUG: Esecuzione interrotta: il run risulta già processato (controlla il file di cache).", flush=True)
+    else:
+        print("DEBUG: Impossibile recuperare i dati da Open-Meteo.", flush=True)
