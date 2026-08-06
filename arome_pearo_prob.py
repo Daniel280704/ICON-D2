@@ -82,25 +82,28 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
         "Accept": "application/x-grib"
     }
     
-    run_hour = f"{dt_run_utc.hour:02d}z"
+    # 1. Rimosso la "z" per matchare il nome esatto della copertura
+    run_hour = f"{dt_run_utc.hour:02d}"
     coverage_id = f"MF-NWP-HIGHRES-PEARO{run_hour}-0025-FRANCE-WCS"
+    
+    # Calcolo orario step
     dt_target_step = dt_run_utc + timedelta(hours=h_step)
     
+    # 2. URL strutturato secondo il percorso RESTful indicato dallo Swagger
+    url_pearo = f"https://public-api.meteofrance.fr/public/pearome/1.0/wcs/{coverage_id}/GetCoverage"
+    
+    # I parametri passati ora riguardano solo il formato e il ritaglio temporale (subset)
     params = {
-        "service": "WCS",
-        "version": "2.0.1",
-        "request": "GetCoverage",
-        "coverageId": coverage_id,
-        "subset": f"http://www.opengis.net/def/axis/OGC/0/time({dt_target_step.strftime('%Y-%m-%dT%H:%M:%SZ')})"
+        "format": "application/x-grib",
+        "subset": f"time({dt_target_step.strftime('%Y-%m-%dT%H:%M:%SZ')})"
     }
     
-    url_pearo = "https://public-api.meteofrance.fr/public/pearome/1.0/wcs"
-    print(f"DEBUG: Richiesta WCS GetCoverage -> Run {run_hour}, Step {h_step} ({dt_target_step.strftime('%Y-%m-%dT%H:%M:%SZ')})", flush=True)
+    print(f"DEBUG: Richiesta WCS RESTful -> Run {run_hour}, Step {h_step} ({dt_target_step.strftime('%Y-%m-%dT%H:%M:%SZ')})", flush=True)
 
     for tentativo in range(max_retries):
         try:
             r = requests.get(url_pearo, params=params, headers=headers, stream=True, timeout=60)
-            print(f"DEBUG: Status Code WCS ricevuto: {r.status_code}", flush=True)
+            print(f"DEBUG: Status Code ricevuto: {r.status_code}", flush=True)
             r.raise_for_status()
             
             fd, temp_path = tempfile.mkstemp(suffix=".grib2")
@@ -122,7 +125,7 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
             return tot_prec
             
         except Exception as e:
-            print(f"DEBUG: Errore WCS al tentativo {tentativo+1}: {e}", flush=True)
+            print(f"DEBUG: Errore al tentativo {tentativo+1}: {e}", flush=True)
             if tentativo == max_retries - 1: raise e
             time.sleep(5)
 
