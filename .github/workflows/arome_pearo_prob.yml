@@ -17,13 +17,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
+          # La riga "cache: 'pip'" è stata rimossa
 
       - name: Installazione dipendenze sistemiche per Cartopy e GRIB
         run: |
           sudo apt-get update
-          sudo apt-get install -y libproj-dev proj-data proj-bin libgeos-dev libeccodes0
-
+# ... il resto del file rimane identico ...
       - name: Installazione librerie Python
         run: |
           python -m pip install --upgrade pip
