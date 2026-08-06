@@ -1,0 +1,47 @@
+name: Mappe Probabilità PEARO (AROME)
+
+on:
+  schedule:
+    - cron: '30 2,5,8,11,14,17,20,23 * * *' # Avvio ciclico
+  workflow_dispatch: # Permette l'avvio manuale dal pannello Actions
+
+jobs:
+  build-and-post:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout del repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Installazione dipendenze sistemiche per Cartopy e GRIB
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libproj-dev proj-data proj-bin libgeos-dev libeccodes0
+
+      - name: Installazione librerie Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy matplotlib cartopy xarray requests pytz earthkit-data eccodes
+
+      - name: Ripristino log ultima esecuzione
+        uses: actions/cache@v4
+        with:
+          path: ultima_ora_arome_prob.txt
+          key: state-pearo-${{ github.run_id }}
+          restore-keys: |
+            state-pearo-
+
+      - name: Esecuzione Script PEARO
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_THREAD_ID_3: ${{ secrets.TELEGRAM_THREAD_ID_3 }}
+          METEO_FRANCE_TOKEN: ${{ secrets.METEO_FRANCE_TOKEN }}
+        run: |
+          python arome_pearo_prob.py
