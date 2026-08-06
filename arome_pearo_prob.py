@@ -24,7 +24,10 @@ urllib3.disable_warnings()
 config.set("cache-policy", "temporary")
 
 LATITUDE, LONGITUDE = 45.07, 7.51
-RUN_DURATION, START_DELAY = 48, 0
+
+# Regole fisse da tabella per AROME (applicate dallo script deterministico)
+RUN_DURATION = 51
+START_DELAY = 2
 
 def fetch_dati_con_retry() -> dict:
     print("DEBUG: Interrogazione Open-Meteo per il controllo run...", flush=True)
@@ -53,31 +56,44 @@ def fetch_dati_con_retry() -> dict:
 def estrai_limiti_run(hourly_data: dict, ref_param: str, utc_offset_sec: int) -> tuple[bool, str, datetime]:
     times = hourly_data.get("time", [])
     mean_vals = hourly_data.get(ref_param, [])
-    
-    if not times or not mean_vals: 
-        return False, "", None
-        
-    end_idx = next((i for i in range(len(mean_vals)-1, -1, -1) if mean_vals[i] is not None), -1)
-    if end_idx == -1: 
-        return False, "", None
-    
+
+    if not times or not mean_vals: return False, "", None
+
+    end_idx = -1
+    for i in range(len(mean_vals) - 1, -1, -1):
+        if mean_vals[i] is not None:
+            end_idx = i
+            break
+
+    if end_idx == -1: return False, "", None
+
     ultima_ora_valida_str = times[end_idx]
+
+    # Calcolo esatto dei limiti run copiato dalla logica AROME
     dt_end_local = datetime.fromisoformat(ultima_ora_valida_str)
-    dt_run_utc_naive = dt_end_local - timedelta(seconds=utc_offset_sec) - timedelta(hours=RUN_DURATION)
-    dt_start_local = dt_run_utc_naive + timedelta(hours=START_DELAY) + timedelta(seconds=utc_offset_sec)
+    dt_end_utc = dt_end_local - timedelta(seconds=utc_offset_sec)
+    dt_run_utc_naive = dt_end_utc - timedelta(hours=RUN_DURATION)
+    dt_start_utc = dt_run_utc_naive + timedelta(hours=START_DELAY)
+
+    dt_start_local = dt_start_utc + timedelta(seconds=utc_offset_sec)
+    start_time_str = dt_start_local.strftime("%Y-%m-%dT%H:%M")
     nome_run = dt_run_utc_naive.strftime("%H") + "Z"
-    
-    try: 
-        start_idx = times.index(dt_start_local.strftime("%Y-%m-%dT%H:%M"))
-    except ValueError: 
+
+    try:
+        start_idx = times.index(start_time_str)
+    except ValueError:
         return False, "", None
-        
-    if (end_idx - start_idx + 1) < (RUN_DURATION - START_DELAY + 1): 
+
+    expected_points = RUN_DURATION - START_DELAY + 1
+    actual_points = end_idx - start_idx + 1
+
+    if actual_points < expected_points:
+        print(f"DEBUG: Run {nome_run} in caricamento... ({actual_points}/{expected_points} ore)", flush=True)
         return False, "", None
-    
-    print(f"DEBUG: Ultima ora valida trovata: {ultima_ora_valida_str} | Run calcolato: {nome_run}", flush=True)
+
+    print(f"DEBUG: Ultima ora trovata: {ultima_ora_valida_str} | Run corretto calcolato: {nome_run}", flush=True)
     print("DEBUG: Controllo cache disattivato per test. Procedo direttamente.", flush=True)
-    
+
     return True, nome_run, dt_run_utc_naive.replace(tzinfo=timezone.utc)
 
 def ottieni_coverage_id_precipitazione(dt_run_utc, mf_token):
@@ -90,10 +106,21 @@ def ottieni_coverage_id_precipitazione(dt_run_utc, mf_token):
     }
     
     print(f"DEBUG: Scansione WCS GetCapabilities su {workspace}...", flush=True)
-    r = requests.get(url_cap, params=params_cap, headers={"apikey": mf_token}, timeout=30)
-    r.raise_for_status()
     
-    matches = re.findall(r'<[^>]*CoverageId>([^<]+)</[^>]*CoverageId>', r.text, re.IGNORECASE)
+    # Blocco Retry per l'errore 500 del server Météo-France
+    for tentativo in range(3):
+        try:
+            r = requests.get(url_cap, params=params_cap, headers={"apikey": mf_token}, timeout=30)
+            r.raise_for_status()
+            xml_text = r.text
+            break # Successo, esce dal loop
+        except Exception as e:
+            print(f"DEBUG: Tentativo {tentativo+1} GetCapabilities fallito: {e}", flush=True)
+            if tentativo == 2:
+                raise ValueError(f"Impossibile superare l'errore 500 di GetCapabilities dopo 3 tentativi: {e}")
+            time.sleep(5)
+    
+    matches = re.findall(r'<[^>]*CoverageId>([^<]+)</[^>]*CoverageId>', xml_text, re.IGNORECASE)
     run_str_colon = dt_run_utc.strftime('%Y-%m-%dT%H:00:00Z')
     run_str_dot = dt_run_utc.strftime('%Y-%m-%dT%H.00.00Z')
 
@@ -102,7 +129,7 @@ def ottieni_coverage_id_precipitazione(dt_run_utc, mf_token):
             print(f"DEBUG: CoverageId base individuato: {m}", flush=True)
             return m
 
-    raise ValueError(f"Nessun CoverageId trovato per precipitazione al run UTC. Trovati: {matches[:3]}")
+    raise ValueError(f"Nessun CoverageId trovato per precipitazione al run UTC {dt_run_utc.hour}Z. Trovati: {matches[:3]}")
 
 def scarica_step_ensemble(dt_run_utc, h_step, cov_id_base, mf_token, max_retries=3):
     dt_target_step = dt_run_utc + timedelta(hours=h_step)
