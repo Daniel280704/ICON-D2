@@ -36,9 +36,11 @@ jobs:
           restore-keys: |
             state-pearo-
 
-      - name: Esecuzione Script PEARO
+            - name: Esecuzione Script PEARO
         env:
+          PYTHONUNBUFFERED: 1 # <--- AGGIUNGI QUESTA RIGA
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          # ... resto delle variabili
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_THREAD_ID_3: ${{ secrets.TELEGRAM_THREAD_ID_3 }}
           METEO_FRANCE_TOKEN: ${{ secrets.METEO_FRANCE_TOKEN }}
