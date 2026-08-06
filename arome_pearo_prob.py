@@ -24,7 +24,7 @@ config.set("cache-policy", "temporary")
 
 # Coordinate focalizzate sull'area di Rivoli/Torino e parametri run
 LATITUDE, LONGITUDE = 45.07, 7.51
-FILE_LAST_HOUR, RUN_DURATION, START_DELAY = "ultima_ora_arome_prob.txt", 48, 0
+RUN_DURATION, START_DELAY = 48, 0
 
 def fetch_dati_con_retry() -> dict:
     print("DEBUG: Interrogazione Open-Meteo per il controllo run...", flush=True)
@@ -68,16 +68,8 @@ def estrai_limiti_run(hourly_data: dict, ref_param: str, utc_offset_sec: int) ->
     if (end_idx - start_idx + 1) < (RUN_DURATION - START_DELAY + 1): return False, "", None
     
     print(f"DEBUG: Ultima ora valida trovata: {ultima_ora_valida_str} | Run calcolato: {nome_run}", flush=True)
+    print("DEBUG: Controllo cache disattivato. Procedo direttamente con l'esecuzione.", flush=True)
     
-    if os.path.exists(FILE_LAST_HOUR):
-        with open(FILE_LAST_HOUR, "r") as f:
-            cached_val = f.read().strip()
-            print(f"DEBUG: Controllo cache -> Salvato: {cached_val} | Attuale: {ultima_ora_valida_str}", flush=True)
-            if ultima_ora_valida_str <= cached_val: 
-                print("DEBUG: Il run è già stato processato in precedenza (nessuna novità).", flush=True)
-                return False, "", None
-            
-    with open(FILE_LAST_HOUR, "w") as f: f.write(ultima_ora_valida_str)
     return True, nome_run, dt_run_utc_naive.replace(tzinfo=timezone.utc)
 
 def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
@@ -251,7 +243,5 @@ if __name__ == "__main__":
         is_new, nome_run, dt_run_utc = estrai_limiti_run(data.get("hourly", {}), "temperature_2m", data.get("utc_offset_seconds", 0))
         if is_new: 
             genera_album_orari(dt_run_utc, nome_run)
-        else:
-            print("DEBUG: Esecuzione interrotta: il run risulta già processato (controlla il file di cache).", flush=True)
     else:
         print("DEBUG: Impossibile recuperare i dati da Open-Meteo.", flush=True)
