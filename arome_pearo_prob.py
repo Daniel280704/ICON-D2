@@ -79,11 +79,10 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
         "Accept": "application/x-grib"
     }
     
-    # URL DA SOSTITUIRE: Inserire qui l'endpoint esatto per il pacchetto PE-AROME 
-    # e il dominio geografico desiderato (es. EURAT01 o FRANGP0025)
+    # URL configurato con il dominio EURAT01 per includere l'intero Piemonte e arco alpino
     run_hour = f"{dt_run_utc.hour:02d}"
     date_str = dt_run_utc.strftime('%Y-%m-%d')
-    url_pearo = f"https://public-api.meteofrance.fr/public/pearome/1.0/coverage/GRIB?date={date_str}T{run_hour}:00:00Z&step={h_step}"
+    url_pearo = f"https://public-api.meteofrance.fr/public/pearome/1.0/coverage/GRIB?date={date_str}T{run_hour}:00:00Z&step={h_step}&grid=EURAT01"
 
     for tentativo in range(max_retries):
         try:
@@ -101,7 +100,7 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
             if 'member' in ds.dims: ds = ds.rename({'member': 'eps'})
             elif 'number' in ds.dims: ds = ds.rename({'number': 'eps'})
             
-            # Estrazione del parametro cumulato PRECIP
+            # Estrazione del parametro cumulato PRECIP (EAU + NEIGE + GRAUPEL)
             tot_prec = ds['PRECIP'].compute()
             ds.close()
             
