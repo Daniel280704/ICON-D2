@@ -6,7 +6,7 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["MPLBACKEND"] = "Agg"
 
-import os, sys, time, json, requests, urllib3, pytz, tempfile
+import os, sys, time, json, requests, urllib3, pytz, tempfile, re
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import BoundaryNorm, ListedColormap
@@ -22,7 +22,6 @@ warnings.filterwarnings('ignore')
 urllib3.disable_warnings()
 config.set("cache-policy", "temporary")
 
-# Coordinate focalizzate sull'area di Rivoli/Torino e parametri run
 LATITUDE, LONGITUDE = 45.07, 7.51
 RUN_DURATION, START_DELAY = 48, 0
 
@@ -50,9 +49,7 @@ def fetch_dati_con_retry() -> dict:
 
 def estrai_limiti_run(hourly_data: dict, ref_param: str, utc_offset_sec: int) -> tuple[bool, str, datetime]:
     times, mean_vals = hourly_data.get("time", []), hourly_data.get(ref_param, [])
-    if not times or not mean_vals: 
-        print("DEBUG: Dati orari vuoti o mancanti nella risposta.", flush=True)
-        return False, "", None
+    if not times or not mean_vals: return False, "", None
         
     end_idx = next((i for i in range(len(mean_vals)-1, -1, -1) if mean_vals[i] is not None), -1)
     if end_idx == -1: return False, "", None
@@ -68,42 +65,62 @@ def estrai_limiti_run(hourly_data: dict, ref_param: str, utc_offset_sec: int) ->
     if (end_idx - start_idx + 1) < (RUN_DURATION - START_DELAY + 1): return False, "", None
     
     print(f"DEBUG: Ultima ora valida trovata: {ultima_ora_valida_str} | Run calcolato: {nome_run}", flush=True)
-    print("DEBUG: Controllo cache disattivato. Procedo direttamente con l'esecuzione.", flush=True)
+    print("DEBUG: Controllo cache disattivato per test. Procedo direttamente.", flush=True)
     
     return True, nome_run, dt_run_utc_naive.replace(tzinfo=timezone.utc)
 
-def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
-    mf_token = os.getenv("METEO_FRANCE_TOKEN")
-    if not mf_token:
-        raise ValueError("Token Météo-France non trovato nelle variabili d'ambiente.")
-
-    headers = {
-        "apikey": mf_token,
-        "Accept": "application/x-grib"
-    }
-    
-    # 1. Rimosso la "z" per matchare il nome esatto della copertura
+def ottieni_coverage_id_precipitazione(dt_run_utc, mf_token):
+    """Interroga dinamicamente il server per scoprire l'ID esatto del parametro precipitazione."""
     run_hour = f"{dt_run_utc.hour:02d}"
-    coverage_id = f"MF-NWP-HIGHRES-PEARO{run_hour}-0025-FRANCE-WCS"
+    workspace = f"MF-NWP-HIGHRES-PEARO{run_hour}-0025-FRANCE-WCS"
+    url_cap = f"https://public-api.meteofrance.fr/public/pearome/1.0/wcs/{workspace}/GetCapabilities"
     
-    # Calcolo orario step
+    params = {"service": "WCS", "version": "2.0.1", "request": "GetCapabilities"}
+    print(f"DEBUG: Scansione WCS GetCapabilities per workspace {workspace}...", flush=True)
+    
+    r = requests.get(url_cap, params=params, headers={"apikey": mf_token}, timeout=30)
+    if r.status_code != 200:
+        raise ValueError(f"Errore GetCapabilities {r.status_code}: {r.text[:200]}")
+        
+    matches = re.findall(r'<[^>]*CoverageId>([^<]+)</[^>]*CoverageId>', r.text, re.IGNORECASE)
+    if not matches:
+        raise ValueError("Nessun CoverageId trovato nell'XML.")
+        
+    for m in matches:
+        if "PRECIPITATION" in m.upper() and "GROUND" in m.upper():
+            print(f"DEBUG: CoverageId individuato con precisione: {m}", flush=True)
+            return m, workspace
+            
+    for m in matches:
+        if "PRECIPITATION" in m.upper():
+            print(f"DEBUG: CoverageId di riserva individuato: {m}", flush=True)
+            return m, workspace
+            
+    raise ValueError(f"Nessun parametro di precipitazione trovato. Esempi estratti: {matches[:3]}")
+
+def scarica_step_precipitazione(dt_run_utc, h_step, cov_id, workspace, mf_token, max_retries=3):
     dt_target_step = dt_run_utc + timedelta(hours=h_step)
+    url_pearo = f"https://public-api.meteofrance.fr/public/pearome/1.0/wcs/{workspace}/GetCoverage"
     
-    # 2. URL strutturato secondo il percorso RESTful indicato dallo Swagger
-    url_pearo = f"https://public-api.meteofrance.fr/public/pearome/1.0/wcs/{coverage_id}/GetCoverage"
+    # Sintassi a lista di tuple per generare chiavi 'subset' multiple nell'URL finale
+    params = [
+        ("service", "WCS"),
+        ("version", "2.0.1"),
+        ("request", "GetCoverage"),
+        ("coverageId", cov_id),
+        ("format", "application/wmo-grib"),
+        ("subset", f"time({dt_target_step.strftime('%Y-%m-%dT%H:%M:%SZ')})"),
+        ("subset", "lat(43.0,47.0)"),
+        ("subset", "long(5.5,11.0)")
+    ]
     
-    # I parametri passati ora riguardano solo il formato e il ritaglio temporale (subset)
-    params = {
-        "format": "application/x-grib",
-        "subset": f"time({dt_target_step.strftime('%Y-%m-%dT%H:%M:%SZ')})"
-    }
-    
-    print(f"DEBUG: Richiesta WCS RESTful -> Run {run_hour}, Step {h_step} ({dt_target_step.strftime('%Y-%m-%dT%H:%M:%SZ')})", flush=True)
+    print(f"DEBUG: Richiesta GetCoverage Step {h_step} -> {dt_target_step.strftime('%Y-%m-%dT%H:%M:%SZ')}", flush=True)
 
     for tentativo in range(max_retries):
         try:
-            r = requests.get(url_pearo, params=params, headers=headers, stream=True, timeout=60)
-            print(f"DEBUG: Status Code ricevuto: {r.status_code}", flush=True)
+            r = requests.get(url_pearo, params=params, headers={"apikey": mf_token}, stream=True, timeout=60)
+            if r.status_code != 200:
+                print(f"DEBUG: Status {r.status_code} - {r.text[:250]}", flush=True)
             r.raise_for_status()
             
             fd, temp_path = tempfile.mkstemp(suffix=".grib2")
@@ -116,7 +133,9 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
             if 'member' in ds.dims: ds = ds.rename({'member': 'eps'})
             elif 'number' in ds.dims: ds = ds.rename({'number': 'eps'})
             
-            tot_prec = ds['PRECIP'].compute()
+            # Estrazione flessibile della prima (e unica) variabile richiesta a Météo-France
+            var_name = list(ds.data_vars)[0]
+            tot_prec = ds[var_name].compute()
             ds.close()
             
             try: os.remove(temp_path)
@@ -125,7 +144,7 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
             return tot_prec
             
         except Exception as e:
-            print(f"DEBUG: Errore al tentativo {tentativo+1}: {e}", flush=True)
+            print(f"DEBUG: Errore Step {h_step} al tentativo {tentativo+1}: {e}", flush=True)
             if tentativo == max_retries - 1: raise e
             time.sleep(5)
 
@@ -162,6 +181,17 @@ def raggruppa_in_blocchi(dt_run_local: datetime) -> dict:
     return blocchi
 
 def genera_album_orari(dt_run_utc: datetime, nome_run: str):
+    mf_token = os.getenv("METEO_FRANCE_TOKEN")
+    if not mf_token:
+        print("DEBUG: Manca il token di Météo-France.", flush=True)
+        return
+        
+    try:
+        cov_id, workspace = ottieni_coverage_id_precipitazione(dt_run_utc, mf_token)
+    except Exception as e:
+        print(f"DEBUG: Blocco script - impossibile superare la fase WCS GetCapabilities: {e}", flush=True)
+        return
+
     rome_tz = pytz.timezone("Europe/Rome")
     dt_run_local = dt_run_utc.astimezone(rome_tz)
     blocchi = raggruppa_in_blocchi(dt_run_local)
@@ -172,12 +202,8 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
     regions_feature = cfeature.NaturalEarthFeature('cultural', 'admin_1_states_provinces', '10m', edgecolor='black', facecolor='none', linewidth=1.5)
     
     shp_path = "shapefiles/ProvCM01012026_WGS84.shp"
-    if os.path.exists(shp_path):
-        valid_geoms = [geom for geom in shpreader.Reader(shp_path).geometries() if not geom.is_empty]
-        prov_feature = cfeature.ShapelyFeature(valid_geoms, ccrs.PlateCarree(), edgecolor='black', facecolor='none', linewidth=0.5, linestyle=':')
-    else:
-        prov_feature = None
-
+    prov_feature = cfeature.ShapelyFeature([geom for geom in shpreader.Reader(shp_path).geometries() if not geom.is_empty], ccrs.PlateCarree(), edgecolor='black', facecolor='none', linewidth=0.5, linestyle=':') if os.path.exists(shp_path) else None
+    
     lats, lons, sigle = [45.07, 44.38, 44.90, 44.91, 45.32, 45.45, 45.56, 45.92], [7.68, 7.55, 8.20, 8.61, 8.42, 8.61, 8.05, 8.55], ["TO", "CN", "AT", "AL", "VC", "NO", "BI", "VB"]
 
     for block_name, ore_list in blocchi.items():
@@ -186,12 +212,12 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
         
         for h in ore_list:
             try:
-                curr_tot = scarica_step_precipitazione(dt_run_utc, h)
+                curr_tot = scarica_step_precipitazione(dt_run_utc, h, cov_id, workspace, mf_token)
                 
                 if h == 1: 
                     prec_oraria = curr_tot
                 else:
-                    prec_h_minus_1 = prev_tot if prev_step_idx == h - 1 else scarica_step_precipitazione(dt_run_utc, h - 1)
+                    prec_h_minus_1 = prev_tot if prev_step_idx == h - 1 else scarica_step_precipitazione(dt_run_utc, h - 1, cov_id, workspace, mf_token)
                     prec_oraria = curr_tot.copy(data=np.maximum(0, curr_tot.values - prec_h_minus_1.values))
                 
                 prev_tot, prev_step_idx = curr_tot, h
@@ -246,5 +272,3 @@ if __name__ == "__main__":
         is_new, nome_run, dt_run_utc = estrai_limiti_run(data.get("hourly", {}), "temperature_2m", data.get("utc_offset_seconds", 0))
         if is_new: 
             genera_album_orari(dt_run_utc, nome_run)
-    else:
-        print("DEBUG: Impossibile recuperare i dati da Open-Meteo.", flush=True)
