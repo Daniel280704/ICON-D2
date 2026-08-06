@@ -25,7 +25,6 @@ config.set("cache-policy", "temporary")
 
 LATITUDE, LONGITUDE = 45.07, 7.51
 
-# Regole fisse da tabella per AROME (applicate dallo script deterministico)
 RUN_DURATION = 51
 START_DELAY = 2
 
@@ -69,7 +68,6 @@ def estrai_limiti_run(hourly_data: dict, ref_param: str, utc_offset_sec: int) ->
 
     ultima_ora_valida_str = times[end_idx]
 
-    # Calcolo esatto dei limiti run copiato dalla logica AROME
     dt_end_local = datetime.fromisoformat(ultima_ora_valida_str)
     dt_end_utc = dt_end_local - timedelta(seconds=utc_offset_sec)
     dt_run_utc_naive = dt_end_utc - timedelta(hours=RUN_DURATION)
@@ -96,40 +94,47 @@ def estrai_limiti_run(hourly_data: dict, ref_param: str, utc_offset_sec: int) ->
 
     return True, nome_run, dt_run_utc_naive.replace(tzinfo=timezone.utc)
 
-def ottieni_coverage_id_precipitazione(dt_run_utc, mf_token):
-    workspace = "MF-NWP-HIGHRES-PEARO000-0025-FRANCE-WCS"
-    url_cap = f"https://public-api.meteofrance.fr/public/pearome/1.0/wcs/{workspace}/GetCapabilities"
-    params_cap = {
-        "service": "WCS", 
-        "version": "2.0.1", 
-        "request": "GetCapabilities"
-    }
-    
-    print(f"DEBUG: Scansione WCS GetCapabilities su {workspace}...", flush=True)
-    
-    # Blocco Retry per l'errore 500 del server Météo-France
-    for tentativo in range(3):
-        try:
-            r = requests.get(url_cap, params=params_cap, headers={"apikey": mf_token}, timeout=30)
-            r.raise_for_status()
-            xml_text = r.text
-            break # Successo, esce dal loop
-        except Exception as e:
-            print(f"DEBUG: Tentativo {tentativo+1} GetCapabilities fallito: {e}", flush=True)
-            if tentativo == 2:
-                raise ValueError(f"Impossibile superare l'errore 500 di GetCapabilities dopo 3 tentativi: {e}")
-            time.sleep(5)
-    
-    matches = re.findall(r'<[^>]*CoverageId>([^<]+)</[^>]*CoverageId>', xml_text, re.IGNORECASE)
-    run_str_colon = dt_run_utc.strftime('%Y-%m-%dT%H:00:00Z')
+def scopri_coverage_id_precipitazione(dt_run_utc, mf_token):
+    print("DEBUG: Bypass GetCapabilities (Errore 500). Tento la scoperta diretta (Brute-force) del parametro...", flush=True)
     run_str_dot = dt_run_utc.strftime('%Y-%m-%dT%H.00.00Z')
+    workspace = "MF-NWP-HIGHRES-PEARO000-0025-FRANCE-WCS"
+    url_pearo = f"https://public-api.meteofrance.fr/public/pearome/1.0/wcs/{workspace}/GetCoverage"
 
-    for m in matches:
-        if "PRECIP" in m.upper() and (run_str_colon in m or run_str_dot in m):
-            print(f"DEBUG: CoverageId base individuato: {m}", flush=True)
-            return m
+    # Creiamo un micro-test di 1 pixel (velocissimo) per verificare quale parametro esiste
+    dt_target_step = dt_run_utc + timedelta(hours=1)
+    target_time_str = dt_target_step.strftime('%Y-%m-%dT%H:%M:%SZ')
 
-    raise ValueError(f"Nessun CoverageId trovato per precipitazione al run UTC {dt_run_utc.hour}Z. Trovati: {matches[:3]}")
+    candidati = [
+        f"TOTAL_PRECIPITATION__GROUND_OR_WATER_SURFACE___{run_str_dot}_PT1H",
+        f"TOTAL_WATER_PRECIPITATION__GROUND_OR_WATER_SURFACE___{run_str_dot}_PT1H",
+        f"PRECIPITATION__GROUND_OR_WATER_SURFACE___{run_str_dot}_PT1H",
+        f"TOTAL_PRECIPITATION__GROUND_OR_WATER_SURFACE___{run_str_dot}",
+        f"TOTAL_WATER_PRECIPITATION__GROUND_OR_WATER_SURFACE___{run_str_dot}"
+    ]
+
+    for cov_id in candidati:
+        print(f"DEBUG: Test ping su -> {cov_id}", flush=True)
+        params_cov = [
+            ("service", "WCS"),
+            ("version", "2.0.1"),
+            ("request", "GetCoverage"),
+            ("coverageId", cov_id),
+            ("format", "application/wmo-grib"),
+            ("subset", f"time({target_time_str})"),
+            ("subset", "lat(45.0,45.1)"),
+            ("subset", "long(7.5,7.6)")
+        ]
+        
+        try:
+            r = requests.get(url_pearo, params=params_cov, headers={"apikey": mf_token}, timeout=15)
+            if r.status_code == 200:
+                print(f"DEBUG: BINGO! Parametro accettato: {cov_id}", flush=True)
+                return cov_id
+        except Exception:
+            pass
+        time.sleep(1)
+
+    raise ValueError("Nessun parametro ha funzionato. Météo-France potrebbe avere i server down.")
 
 def scarica_step_ensemble(dt_run_utc, h_step, cov_id_base, mf_token, max_retries=3):
     dt_target_step = dt_run_utc + timedelta(hours=h_step)
@@ -261,10 +266,15 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
         return
         
     try:
-        cov_id_base = ottieni_coverage_id_precipitazione(dt_run_utc, mf_token)
+        cov_id_base = scopri_coverage_id_precipitazione(dt_run_utc, mf_token)
     except Exception as e:
         print(f"DEBUG: Impossibile ricavare il parametro precipitazione: {e}", flush=True)
         return
+
+    # Se il parametro ha il suffisso _PT1H, i dati sono già su base oraria nativa
+    is_hourly_native = "_PT1H" in cov_id_base
+    if is_hourly_native:
+        print("DEBUG: WOW! Il server fornisce gli accumuli orari nativi (_PT1H). Nessuna sottrazione necessaria!", flush=True)
 
     rome_tz = pytz.timezone("Europe/Rome")
     dt_run_local = dt_run_utc.astimezone(rome_tz)
@@ -296,7 +306,8 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
             try:
                 curr_tot = scarica_step_ensemble(dt_run_utc, h, cov_id_base, mf_token)
                 
-                if h == 1: 
+                # Sfruttiamo l'orario nativo per saltare il download e la sottrazione del passo precedente
+                if is_hourly_native or h == 1: 
                     prec_oraria = curr_tot
                 else:
                     if prev_step_idx == h - 1:
