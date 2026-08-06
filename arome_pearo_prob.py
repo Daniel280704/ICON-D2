@@ -27,7 +27,6 @@ LATITUDE, LONGITUDE = 45.07, 7.51
 FILE_LAST_HOUR, RUN_DURATION, START_DELAY = "ultima_ora_arome_prob.txt", 48, 0
 
 def fetch_dati_con_retry() -> dict:
-    # Utilizziamo l'endpoint di Open-Meteo per rintracciare l'ultimo run disponibile di AROME
     URL, params = "https://api.open-meteo.com/v1/forecast", {
         "latitude": LATITUDE, 
         "longitude": LONGITUDE, 
@@ -79,14 +78,27 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
         "Accept": "application/x-grib"
     }
     
-    # URL configurato con il dominio EURAT01 per includere l'intero Piemonte e arco alpino
-    run_hour = f"{dt_run_utc.hour:02d}"
-    date_str = dt_run_utc.strftime('%Y-%m-%d')
-    url_pearo = f"https://public-api.meteofrance.fr/public/pearome/1.0/coverage/GRIB?date={date_str}T{run_hour}:00:00Z&step={h_step}&grid=EURAT01"
+    run_hour = f"{dt_run_utc.hour:02d}z"
+    coverage_id = f"MF-NWP-HIGHRES-PEARO{run_hour}-0025-FRANCE-WCS"
+    
+    # Calcolo dell'orario esatto dello step previsionale sommando h_step al run UTC
+    dt_target_step = dt_run_utc + timedelta(hours=h_step)
+    
+    params = {
+        "service": "WCS",
+        "version": "2.0.1",
+        "request": "GetCoverage",
+        "coverageId": coverage_id,
+        "subset": f"http://www.opengis.net/def/axis/OGC/0/time({dt_target_step.strftime('%Y-%m-%dT%H:%M:%SZ')})"
+    }
+    
+    url_pearo = "https://public-api.meteofrance.fr/public/pearome/1.0/wcs"
+    print(f"DEBUG: Richiesta WCS GetCoverage -> Run {run_hour}, Step {h_step} ({dt_target_step.strftime('%Y-%m-%dT%H:%M:%SZ')})", flush=True)
 
     for tentativo in range(max_retries):
         try:
-            r = requests.get(url_pearo, headers=headers, stream=True, timeout=30)
+            r = requests.get(url_pearo, params=params, headers=headers, stream=True, timeout=60)
+            print(f"DEBUG: Status Code WCS ricevuto: {r.status_code}", flush=True)
             r.raise_for_status()
             
             fd, temp_path = tempfile.mkstemp(suffix=".grib2")
@@ -96,11 +108,9 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
                     
             ds = earthkit.data.from_source("file", temp_path).to_xarray()
             
-            # Uniforma la dimensione ensemble per i 17 membri di PEARO
             if 'member' in ds.dims: ds = ds.rename({'member': 'eps'})
             elif 'number' in ds.dims: ds = ds.rename({'number': 'eps'})
             
-            # Estrazione del parametro cumulato PRECIP (EAU + NEIGE + GRAUPEL)
             tot_prec = ds['PRECIP'].compute()
             ds.close()
             
@@ -110,6 +120,7 @@ def scarica_step_precipitazione(dt_run_utc, h_step, max_retries=3):
             return tot_prec
             
         except Exception as e:
+            print(f"DEBUG: Errore WCS al tentativo {tentativo+1}: {e}", flush=True)
             if tentativo == max_retries - 1: raise e
             time.sleep(5)
 
@@ -150,7 +161,6 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
     dt_run_local = dt_run_utc.astimezone(rome_tz)
     blocchi = raggruppa_in_blocchi(dt_run_local)
     
-    # Dominio inquadrato sul Nord-Ovest
     domain = [6.0, 10.5, 43.5, 46.8]
     my_levels = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
     my_colors = ["#a0e6ff", "#00a0ff", "#00ff00", "#ffff00", "#ffaa00", "#ff0000", "#cc0000", "#ff00ff", "#800080"]
@@ -173,7 +183,6 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
             try:
                 curr_tot = scarica_step_precipitazione(dt_run_utc, h)
                 
-                # Calcolo della precipitazione oraria isolando il singolo step dal cumulato
                 if h == 1: 
                     prec_oraria = curr_tot
                 else:
@@ -182,11 +191,9 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                 
                 prev_tot, prev_step_idx = curr_tot, h
 
-                # Calcolo della probabilità statistica sull'ensemble (soglia 0.5 mm)
                 mean_xr = (prec_oraria >= 0.5).astype(float).mean(dim="eps") * 100
                 lat_vals, lon_vals, mean_vals = mean_xr['latitude'].values.flatten(), mean_xr['longitude'].values.flatten(), mean_xr.values.flatten()
                 
-                # Ritaglio sul dominio
                 mask_nw = (lat_vals >= 43.5) & (lat_vals <= 46.8) & (lon_vals >= 6.0) & (lon_vals <= 10.5)
                 lat_crop, lon_crop, mean_crop = lat_vals[mask_nw], lon_vals[mask_nw], np.nan_to_num(mean_vals[mask_nw], nan=0.0)
 
@@ -205,7 +212,6 @@ def genera_album_orari(dt_run_utc: datetime, nome_run: str):
                     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm); sm.set_array([]) 
                     cbar = plt.colorbar(sm, ax=ax, orientation='horizontal', shrink=0.7, pad=0.05); cbar.set_label("Probabilità (%)", fontweight='bold')
 
-                # Marker focalizzato sull'area di Rivoli
                 ax.plot(LONGITUDE, LATITUDE, marker='o', color='brown', markersize=6, transform=ccrs.PlateCarree())
                 for lo, la, sig in zip(lons, lats, sigle):
                     ax.plot(lo, la, marker='o', color='black', markersize=3, transform=ccrs.PlateCarree())
